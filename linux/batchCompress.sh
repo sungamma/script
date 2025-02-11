@@ -1,0 +1,232 @@
+#!/bin/bash
+
+##############################################
+# 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
+# 版本：5.0 | 增强功能版
+# 修改：支持直接输入编码速度，输出编码速度和 CRF 值
+##############################################
+
+SECONDS=0
+
+# 全局配置
+declare -A SUPPORTED=(
+    ["ENCODERS"]="x264 x265 vp9"
+    ["FORMATS"]="mp4 mkv avi flv mov wmv mpg mpeg"
+    ["PRESETS"]="ultrafast superfast veryfast faster fast medium slow slower veryslow"
+    ["X264_CRF"]="0-51"
+    ["X265_CRF"]="0-51"
+    ["VP9_CRF"]="0-63"
+)
+
+# 统计变量
+declare -i TOTAL_FILES=0
+declare -i PROCESSED=0
+declare -a FILE_STATS
+TOTAL_ORIGIN=0
+TOTAL_COMPRESSED=0
+
+start_timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+
+# 工具函数
+format_bytes() {
+    awk -v bytes="$1" '
+    BEGIN {
+        suffix="BKMGT"
+        while (bytes >= 1024 && length(suffix) > 1) {
+            bytes /= 1024
+            suffix = substr(suffix, 2)
+        }
+        printf("%.2f%s", bytes, substr(suffix,1,1))
+    }'
+}
+
+show_usage() {
+    echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...]"
+    echo "选项:"
+    echo "  -crf <数值>   设置压缩质量（默认28）"
+    echo "编码器:"
+    echo "  ${SUPPORTED[ENCODERS]}"
+    echo "文件格式:"
+    echo "  all 或 ${SUPPORTED[FORMATS]}"
+    echo "编码速度:"
+    echo "  ${SUPPORTED[PRESETS]}"
+    echo "示例:"
+    echo "  $0 x265 fast mkv"
+    echo "  $0 all vp9 medium"
+}
+
+# 参数验证系统
+validate_params() {
+    local args=("$@")
+    local crf=28
+    local preset="faster"
+    local encoders=()
+    local formats=()
+    local position=0
+
+    while (( position < ${#args[@]} )); do
+        local arg="${args[position]}"
+
+        case "$arg" in
+            -crf)
+                (( position++ ))
+                [[ -z "${args[position]}" ]] && { echo "错误：-crf 需要参数值"; return 1; }
+                [[ ! "${args[position]}" =~ ^[0-9]+$ ]] && { echo "错误：无效的CRF值 '${args[position]}'"; return 1; }
+                crf="${args[position]}"
+                ;;
+            *)
+                if [[ " ${SUPPORTED[PRESETS]} " =~ " $arg " ]]; then
+                    preset="$arg"
+                elif [[ " ${SUPPORTED[ENCODERS]} " =~ " $arg " ]]; then
+                    encoders+=("$arg")
+                elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
+                    [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
+                else
+                    echo "错误：无效参数 '$arg'"
+                    return 1
+                fi
+                ;;
+        esac
+        (( position++ ))
+    done
+
+    # 后期验证
+    [[ ${#encoders[@]} -eq 0 ]] && encoders=("x265")
+    [[ ${#formats[@]} -eq 0 ]] && formats=("mp4")
+
+    # 编码器CRF范围验证
+    for enc in "${encoders[@]}"; do
+        case $enc in
+            x264)
+                crf=${crf:-25}  # 默认值为25
+                (( crf < 0 || crf > 51 )) && {
+                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X264_CRF]}"
+                    return 1
+                }
+                ;;
+            x265)
+                crf=${crf:-28}  # 默认值为28
+                (( crf < 0 || crf > 51 )) && {
+                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X265_CRF]}"
+                    return 1
+                }
+                ;;
+            vp9)
+                crf=${crf:-30}  # 默认值为30
+                (( crf < 0 || crf > 63 )) && {
+                    echo "错误：vp9 的CRF范围应为 ${SUPPORTED[VP9_CRF]}"
+                    return 1
+                }
+                ;;
+        esac
+    done
+
+    # 去重处理
+    encoders=($(printf "%s\n" "${encoders[@]}" | sort -u))
+    formats=($(printf "%s\n" "${formats[@]}" | sort -u))
+
+    # 导出验证结果
+    declare -g CRF=$crf
+    declare -g PRESET=$preset
+    declare -g ENCODERS=("${encoders[@]}")
+    declare -g FORMATS=("${formats[@]}")
+    return 0
+}
+
+# 文件处理
+process_file() {
+    local src="$1" enc="$2"
+    local base="${src%.*}" ext="${src##*.}"
+    local dest="${base}-${enc}.${ext}"
+
+    # 跳过已处理文件
+    if [[ -f "$dest" ]] || [[ "$src" =~ -(x264|x265|vp9)\. ]]; then
+        echo "跳过已处理文件：$src" | tee -a compress.log
+        return
+    fi
+
+    local start=$(date +%s)
+    local orig_size=$(stat -c%s "$src")
+    ((TOTAL_FILES++))
+
+    echo "处理：$src ($(format_bytes $orig_size))" | tee -a compress.log
+
+    local cmd="ffmpeg7 -hide_banner -i \"$src\""
+    case "$enc" in
+        x265) cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
+              cmd+=" -tag:v hvc1"  # 添加HEVC兼容标签
+              ;;
+        x264) cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
+              cmd+=" -profile:v high -level 4.1" ;;
+        vp9)  cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1" ;;
+    esac
+    cmd+=" -c:a copy \"$dest\""
+
+    if eval $cmd 2>&1; then
+        local comp_size=$(stat -c%s "$dest")
+        ((PROCESSED++))
+        TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
+        TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
+
+        local log="文件：$src\n"
+        log+="编码方案：$enc\n"
+        log+="CRF值：$CRF\n"
+        log+="编码速度：$PRESET\n"
+        log+="耗时：$(date -d@$(($(date +%s)-start)) -u +%Hh%Mm%Ss)\n"
+        log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
+        log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
+        FILE_STATS+=("$log")
+    else
+        echo "[错误] 处理失败：$src" | tee -a compress.log
+        rm -f "$dest"
+    fi
+}
+
+# 主函数
+main() {
+    # 参数验证
+    if ! validate_params "$@"; then
+        echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}"
+        echo "支持的文件格式：${SUPPORTED[FORMATS]}"
+        echo "支持的编码速度：${SUPPORTED[PRESETS]}"
+        show_usage
+        exit 1
+    fi
+
+    # 执行压缩
+    echo "==== 开始处理 ====" | tee -a compress.log
+    echo "编码器：${ENCODERS[*]}" | tee -a compress.log
+    echo "文件格式：${FORMATS[*]}" | tee -a compress.log
+    echo "CRF值：$CRF" | tee -a compress.log
+    echo "编码速度：$PRESET" | tee -a compress.log
+
+    for fmt in "${FORMATS[@]}"; do
+        for file in *."$fmt"; do
+            [[ -f "$file" ]] || continue  # 确保是文件
+            for enc in "${ENCODERS[@]}"; do
+                process_file "$file" "$enc"
+            done
+        done
+    done
+
+    # 生成报告
+    echo -e "\n==== 处理完成 ====" | tee -a compress.log
+    echo "已处理：$PROCESSED/$TOTAL_FILES" | tee -a compress.log
+    echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a compress.log
+    echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a compress.log
+    echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a compress.log
+
+    [[ ${#FILE_STATS[@]} -gt 0 ]] && {
+        echo -e "\n详细统计：" | tee -a compress.log
+        for log in "${FILE_STATS[@]}"; do
+            echo -e "$log" | tee -a compress.log
+        done
+    }
+
+    # 输出总耗时
+    duration=$SECONDS
+    echo "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒" | tee -a compress.log
+}
+
+# 脚本入口
+main "$@"
