@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：6.1 | 直接线程参数版
+# 版本：7.0 | 目录支持版
 ##############################################
 
 SECONDS=0
@@ -17,7 +17,7 @@ declare -A SUPPORTED=(
     ["VP9_CRF"]="0-63"
 )
 
-# 获取CPU最大线程数
+# 获取CPU信息
 MAX_THREADS=$(nproc)
 declare -i MAX_THREADS
 
@@ -47,6 +47,7 @@ show_usage() {
     echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数]"
     echo "选项:"
     echo "  -crf <数值>   设置压缩质量（默认28）"
+    echo "  -d <目录>     指定工作目录（默认当前目录）"
     echo "编码器:"
     echo "  ${SUPPORTED[ENCODERS]}"
     echo "文件格式:"
@@ -54,10 +55,10 @@ show_usage() {
     echo "编码速度:"
     echo "  ${SUPPORTED[PRESETS]}"
     echo "线程数:"
-    echo "  s1|s2|s3... (最大s$MAX_THREADS)"
+    echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
     echo "示例:"
-    echo "  $0 x265 s2 fast mkv"
-    echo "  $0 all vp9 -crf 30 s4 medium"
+    echo "  $0 x265 -d ~/Videos s4 fast mkv"
+    echo "  $0 -d /data all vp9 -crf 30 medium"
 }
 
 # 参数验证系统
@@ -65,7 +66,8 @@ validate_params() {
     local args=("$@")
     local crf=28
     local preset="faster"
-    local threads=MAX_THREADS
+    local threads=$MAX_THREADS  # 默认使用最大线程
+    local directory="."
     local encoders=()
     local formats=()
     local position=0
@@ -80,8 +82,13 @@ validate_params() {
                 [[ ! "${args[position]}" =~ ^[0-9]+$ ]] && { echo "错误：无效的CRF值 '${args[position]}'"; return 1; }
                 crf="${args[position]}"
                 ;;
+            -d)
+                (( position++ ))
+                [[ -z "${args[position]}" ]] && { echo "错误：-d 需要目录参数"; return 1; }
+                directory="${args[position]}"
+                [[ ! -d "$directory" ]] && { echo "错误：目录不存在 '$directory'"; return 1; }
+                ;;
             s*)
-                # 提取线程数
                 threads="${arg#s}"
                 [[ ! "$threads" =~ ^[0-9]+$ ]] && { echo "错误：无效的线程数格式 '$arg'"; return 1; }
                 (( threads > MAX_THREADS )) && {
@@ -137,6 +144,7 @@ validate_params() {
     formats=($(printf "%s\n" "${formats[@]}" | sort -u))
 
     # 导出验证结果
+    declare -g WORK_DIR="$directory"
     declare -g CRF=$crf
     declare -g PRESET=$preset
     declare -g THREADS=$threads
@@ -211,6 +219,10 @@ main() {
         show_usage
         exit 1
     fi
+
+    # 切换工作目录
+    cd "$WORK_DIR" || { echo "无法进入目录：$WORK_DIR"; exit 1; }
+    echo "工作目录：$(pwd)" | tee -a compress.log
 
     # 执行压缩
     echo "==== 开始处理 ====" | tee -a compress.log
