@@ -2,8 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：5.0 | 增强功能版
-# 修改：支持直接输入编码速度，输出编码速度和 CRF 值
+# 版本：6.1 | 直接线程参数版
 ##############################################
 
 SECONDS=0
@@ -17,6 +16,10 @@ declare -A SUPPORTED=(
     ["X265_CRF"]="0-51"
     ["VP9_CRF"]="0-63"
 )
+
+# 获取CPU最大线程数
+MAX_THREADS=$(nproc)
+declare -i MAX_THREADS
 
 # 统计变量
 declare -i TOTAL_FILES=0
@@ -41,7 +44,7 @@ format_bytes() {
 }
 
 show_usage() {
-    echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...]"
+    echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数]"
     echo "选项:"
     echo "  -crf <数值>   设置压缩质量（默认28）"
     echo "编码器:"
@@ -50,9 +53,11 @@ show_usage() {
     echo "  all 或 ${SUPPORTED[FORMATS]}"
     echo "编码速度:"
     echo "  ${SUPPORTED[PRESETS]}"
+    echo "线程数:"
+    echo "  s1|s2|s3... (最大s$MAX_THREADS)"
     echo "示例:"
-    echo "  $0 x265 fast mkv"
-    echo "  $0 all vp9 medium"
+    echo "  $0 x265 s2 fast mkv"
+    echo "  $0 all vp9 -crf 30 s4 medium"
 }
 
 # 参数验证系统
@@ -60,6 +65,7 @@ validate_params() {
     local args=("$@")
     local crf=28
     local preset="faster"
+    local threads=MAX_THREADS
     local encoders=()
     local formats=()
     local position=0
@@ -73,6 +79,14 @@ validate_params() {
                 [[ -z "${args[position]}" ]] && { echo "错误：-crf 需要参数值"; return 1; }
                 [[ ! "${args[position]}" =~ ^[0-9]+$ ]] && { echo "错误：无效的CRF值 '${args[position]}'"; return 1; }
                 crf="${args[position]}"
+                ;;
+            s*)
+                # 提取线程数
+                threads="${arg#s}"
+                [[ ! "$threads" =~ ^[0-9]+$ ]] && { echo "错误：无效的线程数格式 '$arg'"; return 1; }
+                (( threads > MAX_THREADS )) && {
+                    echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"; return 1; }
+                (( threads < 1 )) && { echo "错误：线程数不能小于1"; return 1; }
                 ;;
             *)
                 if [[ " ${SUPPORTED[PRESETS]} " =~ " $arg " ]]; then
@@ -98,21 +112,18 @@ validate_params() {
     for enc in "${encoders[@]}"; do
         case $enc in
             x264)
-                crf=${crf:-25}  # 默认值为25
                 (( crf < 0 || crf > 51 )) && {
                     echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X264_CRF]}"
                     return 1
                 }
                 ;;
             x265)
-                crf=${crf:-28}  # 默认值为28
                 (( crf < 0 || crf > 51 )) && {
                     echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X265_CRF]}"
                     return 1
                 }
                 ;;
             vp9)
-                crf=${crf:-30}  # 默认值为30
                 (( crf < 0 || crf > 63 )) && {
                     echo "错误：vp9 的CRF范围应为 ${SUPPORTED[VP9_CRF]}"
                     return 1
@@ -128,6 +139,7 @@ validate_params() {
     # 导出验证结果
     declare -g CRF=$crf
     declare -g PRESET=$preset
+    declare -g THREADS=$threads
     declare -g ENCODERS=("${encoders[@]}")
     declare -g FORMATS=("${formats[@]}")
     return 0
@@ -153,12 +165,18 @@ process_file() {
 
     local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
-        x265) cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
-              cmd+=" -tag:v hvc1"  # 添加HEVC兼容标签
-              ;;
-        x264) cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
-              cmd+=" -profile:v high -level 4.1" ;;
-        vp9)  cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1" ;;
+        x265)
+            cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
+            cmd+=" -tag:v hvc1 -threads $THREADS"
+            ;;
+        x264)
+            cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
+            cmd+=" -profile:v high -level 4.1 -threads $THREADS"
+            ;;
+        vp9)
+            cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1"
+            (( THREADS > 1 )) && cmd+=" -threads $THREADS"
+            ;;
     esac
     cmd+=" -c:a copy \"$dest\""
 
@@ -170,7 +188,7 @@ process_file() {
 
         local log="文件：$src\n"
         log+="编码方案：$enc\n"
-        log+="CRF值：$CRF\n"
+        log+="CRF值：$CRF | 线程数：$THREADS\n"
         log+="编码速度：$PRESET\n"
         log+="耗时：$(date -d@$(($(date +%s)-start)) -u +%Hh%Mm%Ss)\n"
         log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
@@ -189,6 +207,7 @@ main() {
         echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}"
         echo "支持的文件格式：${SUPPORTED[FORMATS]}"
         echo "支持的编码速度：${SUPPORTED[PRESETS]}"
+        echo "最大支持线程数：$MAX_THREADS"
         show_usage
         exit 1
     fi
@@ -199,10 +218,12 @@ main() {
     echo "文件格式：${FORMATS[*]}" | tee -a compress.log
     echo "CRF值：$CRF" | tee -a compress.log
     echo "编码速度：$PRESET" | tee -a compress.log
+    echo "使用线程数：$THREADS" | tee -a compress.log
+    echo "CPU最大线程数：$MAX_THREADS" | tee -a compress.log
 
     for fmt in "${FORMATS[@]}"; do
         for file in *."$fmt"; do
-            [[ -f "$file" ]] || continue  # 确保是文件
+            [[ -f "$file" ]] || continue
             for enc in "${ENCODERS[@]}"; do
                 process_file "$file" "$enc"
             done
