@@ -57,8 +57,10 @@ show_usage() {
     echo "线程数:"
     echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
     echo "示例:"
-    echo "  $0 x265 -d ~/Videos s4 fast mkv"
-    echo "  $0 -d /data all vp9 -crf 30 medium"
+    echo "  # 处理当前目录"
+    echo "  $0 x265 fast mkv"
+    echo "  # 处理指定目录"
+    echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
 }
 
 # 参数验证系统
