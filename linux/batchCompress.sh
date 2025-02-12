@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.2 | 单独文件支持版
+# 版本：7.7 | 详细统计调整版
 ##############################################
 
 SECONDS=0
@@ -30,6 +30,9 @@ TOTAL_COMPRESSED=0
 
 start_timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
+# 日志文件路径
+LOGFILE="compress.log"
+
 # 工具函数
 format_bytes() {
     awk -v bytes="$1" '
@@ -41,6 +44,17 @@ format_bytes() {
         }
         printf("%.2f%s", bytes, substr(suffix,1,1))
     }'
+}
+
+# 将日志内容添加到日志文件的最上面
+log_to_top() {
+    local log_content="$1"
+    local temp_log="temp_compress.log"
+    echo -e "$log_content" > "$temp_log"  # 使用 -e 解释换行符
+    if [[ -f "$LOGFILE" ]]; then
+        cat "$LOGFILE" >> "$temp_log"
+    fi
+    mv "$temp_log" "$LOGFILE"
 }
 
 show_usage() {
@@ -171,15 +185,17 @@ process_file() {
 
     # 跳过已处理文件
     if [[ -f "$dest" ]] || [[ "$src" =~ -(x264|x265|vp9)\. ]]; then
-        echo "跳过已处理文件：$src" | tee -a compress.log
+        echo "跳过已处理文件：$src" | tee -a "$LOGFILE"
         return
     fi
 
     local start=$(date +%s)
+    local start_time=$(date +"%Y-%m-%d %H:%M:%S")
     local orig_size=$(stat -c%s "$src")
     ((TOTAL_FILES++))
 
-    echo "处理：$src ($(format_bytes $orig_size))" | tee -a compress.log
+    echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
+    echo "开始时间：$start_time" | tee -a "$LOGFILE"
 
     local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
@@ -204,16 +220,18 @@ process_file() {
         TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
         TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
 
+        local end_time=$(date +"%Y-%m-%d %H:%M:%S")
+        local duration=$(( $(date +%s) - start ))
+
         local log="文件：$src\n"
-        log+="编码方案：$enc\n"
-        log+="CRF值：$CRF | 线程数：$THREADS\n"
-        log+="编码速度：$PRESET\n"
-        log+="耗时：$(date -d@$(($(date +%s)-start)) -u +%Hh%Mm%Ss)\n"
+        log+="开始时间：$start_time\n"
+        log+="结束时间：$end_time\n"
+        log+="耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n"
         log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
         log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
         FILE_STATS+=("$log")
     else
-        echo "[错误] 处理失败：$src" | tee -a compress.log
+        echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
         rm -f "$dest"
     fi
 }
@@ -222,26 +240,26 @@ process_file() {
 main() {
     # 参数验证
     if ! validate_params "$@"; then
-        echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}"
-        echo "支持的文件格式：${SUPPORTED[FORMATS]}"
-        echo "支持的编码速度：${SUPPORTED[PRESETS]}"
-        echo "最大支持线程数：$MAX_THREADS"
+        echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}" | tee -a "$LOGFILE"
+        echo "支持的文件格式：${SUPPORTED[FORMATS]}" | tee -a "$LOGFILE"
+        echo "支持的编码速度：${SUPPORTED[PRESETS]}" | tee -a "$LOGFILE"
+        echo "最大支持线程数：$MAX_THREADS" | tee -a "$LOGFILE"
         show_usage
         exit 1
     fi
 
     # 切换工作目录
-    cd "$WORK_DIR" || { echo "无法进入目录：$WORK_DIR"; exit 1; }
-    echo "工作目录：$(pwd)" | tee -a compress.log
+    cd "$WORK_DIR" || { echo "无法进入目录：$WORK_DIR" | tee -a "$LOGFILE"; exit 1; }
+    echo "工作目录：$(pwd)" | tee -a "$LOGFILE"
 
     # 执行压缩
-    echo "==== 开始处理 ====" | tee -a compress.log
-    echo "编码器：${ENCODERS[*]}" | tee -a compress.log
-    echo "文件格式：${FORMATS[*]}" | tee -a compress.log
-    echo "CRF值：$CRF" | tee -a compress.log
-    echo "编码速度：$PRESET" | tee -a compress.log
-    echo "使用线程数：$THREADS" | tee -a compress.log
-    echo "CPU最大线程数：$MAX_THREADS" | tee -a compress.log
+    echo "==== 开始处理 ====" | tee -a "$LOGFILE"
+    echo "编码器：${ENCODERS[*]}" | tee -a "$LOGFILE"
+    echo "文件格式：${FORMATS[*]}" | tee -a "$LOGFILE"
+    echo "CRF值：$CRF" | tee -a "$LOGFILE"
+    echo "编码速度：$PRESET" | tee -a "$LOGFILE"
+    echo "使用线程数：$THREADS" | tee -a "$LOGFILE"
+    echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
 
     # 如果指定了单独文件，只处理这些文件
     if [[ ${#FILES[@]} -gt 0 ]]; then
@@ -264,22 +282,23 @@ main() {
     fi
 
     # 生成报告
-    echo -e "\n==== 处理完成 ====" | tee -a compress.log
-    echo "已处理：$PROCESSED/$TOTAL_FILES" | tee -a compress.log
-    echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a compress.log
-    echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a compress.log
-    echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a compress.log
-
-    [[ ${#FILE_STATS[@]} -gt 0 ]] && {
-        echo -e "\n详细统计：" | tee -a compress.log
-        for log in "${FILE_STATS[@]}"; do
-            echo -e "$log" | tee -a compress.log
-        done
-    }
+    echo -e "\n==== 处理完成 ====" | tee -a "$LOGFILE"
+    echo "已处理：$PROCESSED/$TOTAL_FILES" | tee -a "$LOGFILE"
+    echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a "$LOGFILE"
+    echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a "$LOGFILE"
+    echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a "$LOGFILE"
 
     # 输出总耗时
     duration=$SECONDS
-    echo "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒" | tee -a compress.log
+    echo "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒" | tee -a "$LOGFILE"
+
+    # 输出详细统计
+    if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
+        echo -e "\n==== 详细统计 ====" | tee -a "$LOGFILE"
+        for log in "${FILE_STATS[@]}"; do
+            echo -e "$log" | tee -a "$LOGFILE"
+        done
+    fi
 }
 
 # 脚本入口
