@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.7 | 详细统计调整版
+# 版本：7.8 | Ctrl+C 退出整个程序版
 ##############################################
 
 SECONDS=0
@@ -236,6 +236,15 @@ process_file() {
     fi
 }
 
+# 捕获 Ctrl+C 信号
+handle_interrupt() {
+    echo "中断信号捕获，正在退出脚本..." | tee -a "$LOGFILE"
+    exit 1
+}
+
+# 注册信号处理函数
+trap handle_interrupt SIGINT
+
 # 主函数
 main() {
     # 参数验证
@@ -294,7 +303,7 @@ main() {
 
     # 输出详细统计
     if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
-        echo -e "\n==== 详细统计 ====" | tee -a "$LOGFILE"
+        echo -e "\n详细统计：" | tee -a "$LOGFILE"
         for log in "${FILE_STATS[@]}"; do
             echo -e "$log" | tee -a "$LOGFILE"
         done
