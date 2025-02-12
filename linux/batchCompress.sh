@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.8 | Ctrl+C 退出整个程序版
+# 版本：7.9 | 增加 -h 和 --help 参数支持
 ##############################################
 
 SECONDS=0
@@ -57,17 +57,19 @@ log_to_top() {
     mv "$temp_log" "$LOGFILE"
 }
 
-show_usage() {
+# 显示帮助信息
+show_help() {
     echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数] [文件...]"
     echo "选项:"
-    echo "  -crf <数值>   设置压缩质量（默认28）"
-    echo "  -d <目录>     指定工作目录（默认当前目录）"
+    echo "  -h, --help      显示此帮助信息"
+    echo "  -crf <数值>     设置压缩质量（默认28）"
+    echo "  -d <目录>       指定工作目录（默认当前目录）"
     echo "编码器:"
     echo "  ${SUPPORTED[ENCODERS]}"
     echo "文件格式:"
     echo "  all 或 ${SUPPORTED[FORMATS]}"
     echo "编码速度:"
-    echo "  ${SUPPORTED[PRESETS]}"
+    echo "  ${SUPPORTED[PRESETS]} (默认faster)"
     echo "线程数:"
     echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
     echo "文件:"
@@ -79,6 +81,7 @@ show_usage() {
     echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
     echo "  # 处理指定文件"
     echo "  $0 a.mp4 b.mkv fast x264"
+    exit 0
 }
 
 # 参数验证系统
@@ -97,6 +100,9 @@ validate_params() {
         local arg="${args[position]}"
 
         case "$arg" in
+            -h|--help)
+                show_help
+                ;;
             -crf)
                 (( position++ ))
                 [[ -z "${args[position]}" ]] && { echo "错误：-crf 需要参数值"; return 1; }
@@ -299,11 +305,11 @@ main() {
 
     # 输出总耗时
     duration=$SECONDS
-    echo "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒" | tee -a "$LOGFILE"
+    echo -e "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n" | tee -a "$LOGFILE"
 
     # 输出详细统计
     if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
-        echo -e "\n详细统计：" | tee -a "$LOGFILE"
+        echo -e "==== 详细统计 ====" | tee -a "$LOGFILE"
         for log in "${FILE_STATS[@]}"; do
             echo -e "$log" | tee -a "$LOGFILE"
         done
