@@ -88,8 +88,17 @@ show_help() {
     echo "  ${SUPPORTED[PRESETS]} (默认faster)"
     echo "线程数:"
     echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
+    echo "文件:"
+    echo "  可选，指定单独处理的文件（支持通配符）"
     echo "示例:"
-    echo "  $0 -d test x265 ultrafast s2 '*.mp4'"
+    echo "  # 处理当前目录"
+    echo "  $0 x265 fast mkv"
+    echo "  # 处理指定目录"
+    echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
+    echo "  # 处理指定文件"
+    echo "  $0 a.mp4 b.mkv fast x264"
+    echo "  # 处理以a开头的mp4文件"
+    echo "  $0 x264 a*.mp4"
     exit 0
 }
 
@@ -172,6 +181,35 @@ validate_params() {
     [[ ${#encoders[@]} -eq 0 ]] && encoders=("x265")
     [[ ${#formats[@]} -eq 0 ]] && formats=("mp4")
 
+
+    # 编码器CRF范围验证
+    for enc in "${encoders[@]}"; do
+        case $enc in
+            x264)
+                (( crf < 0 || crf > 51 )) && {
+                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X264_CRF]}"
+                    return 1
+                }
+                ;;
+            x265)
+                (( crf < 0 || crf > 51 )) && {
+                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X265_CRF]}"
+                    return 1
+                }
+                ;;
+            vp9)
+                (( crf < 0 || crf > 63 )) && {
+                    echo "错误：vp9 的CRF范围应为 ${SUPPORTED[VP9_CRF]}"
+                    return 1
+                }
+                ;;
+        esac
+    done
+
+    # 去重处理
+    encoders=($(printf "%s\n" "${encoders[@]}" | sort -u))
+    formats=($(printf "%s\n" "${formats[@]}" | sort -u))
+
     # 导出验证结果
     declare -g WORK_DIR="$directory"
     declare -g CRF=$crf
@@ -189,6 +227,7 @@ process_file() {
     local ext="${src##*.}"
     local dest="${WORK_DIR}/${base}-${enc}.${ext}"
 
+   # 跳过已处理文件
     if [[ -f "$dest" ]] || [[ "$src" =~ -(x264|x265|vp9)\. ]]; then
         echo "跳过已处理文件：$src" | tee -a "$LOGFILE"
         return
@@ -219,7 +258,12 @@ process_file() {
         local end_time=$(date +"%Y-%m-%d %H:%M:%S")
         local duration=$(( $(date +%s) - start ))
 
-        local log="文件：$src\n开始：$start_time\n结束：$end_time\n耗时：$(printf "%02d:%02d:%02d" $((duration/3600)) $((duration%3600/60)) $((duration%60)))\n原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
+        local log="文件：$src\n"
+        log+="开始时间：$start_time\n"
+        log+="结束时间：$end_time\n"
+        log+="耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n"
+        log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
+        log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
         FILE_STATS+=("$log")
     else
         echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
@@ -233,11 +277,27 @@ main() {
         echo "提示：检测到 zsh 环境，自动切换至 bash 执行" | tee -a "$LOGFILE"
         exec bash "$0" "$@"
     fi
-    validate_params "$@" || { show_help; exit 1; }
-    cd "$WORK_DIR" || exit 1
+    # 参数验证
+    if ! validate_params "$@"; then
+        echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}" | tee -a "$LOGFILE"
+        echo "支持的文件格式：${SUPPORTED[FORMATS]}" | tee -a "$LOGFILE"
+        echo "支持的编码速度：${SUPPORTED[PRESETS]}" | tee -a "$LOGFILE"
+        echo "最大支持线程数：$MAX_THREADS" | tee -a "$LOGFILE"
+        show_help
+        exit 1
+    fi
+
+    # 切换工作目录
+    cd "$WORK_DIR" || { echo "无法进入目录：$WORK_DIR" | tee -a "$LOGFILE"; exit 1; }
 
     echo "==== 开始处理 ====" | tee -a "$LOGFILE"
     echo "工作目录：$WORK_DIR" | tee -a "$LOGFILE"
+    echo "编码器：${ENCODERS[*]}" | tee -a "$LOGFILE"
+    echo "文件格式：${FORMATS[*]}" | tee -a "$LOGFILE"
+    echo "CRF值：$CRF" | tee -a "$LOGFILE"
+    echo "编码速度：$PRESET" | tee -a "$LOGFILE"
+    echo "使用线程数：$THREADS" | tee -a "$LOGFILE"
+    echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
 
     # 优先处理单独指定的文件
     if [[ ${#FILES[@]} -gt 0 ]]; then
@@ -267,12 +327,14 @@ main() {
     echo -e "总耗时：$(($SECONDS / 3600))小时$((($SECONDS / 60) % 60))分钟$(($SECONDS % 60))秒\n" | tee -a "$LOGFILE"
 
     # 输出详细统计
-    [[ ${#FILE_STATS[@]} -gt 0 ]] && {
+    # [[ ${#FILE_STATS[@]} -gt 0 ]] && {
+    if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
         echo -e "==== 详细统计 ====" | tee -a "$LOGFILE"
         for log in "${FILE_STATS[@]}"; do
             echo -e "$log" | tee -a "$LOGFILE"
         done
-    }
+    fi
+    # }
 }
 
 trap 'echo "中断操作！"; exit 1' SIGINT
