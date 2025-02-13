@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.4 | 适用于 zsh 和其他 shell
+# 版本：8.5 | 修复路径处理问题
 ##############################################
 
 SECONDS=0
@@ -46,18 +46,34 @@ format_bytes() {
     }'
 }
 
-# 将日志内容添加到日志文件的最上面
+
+# 新增工具函数：兼容不同shell的nullglob设置
+set_nullglob() {
+    if [ -n "$BASH_VERSION" ]; then
+        shopt -s nullglob 2>/dev/null
+    elif [ -n "$ZSH_VERSION" ]; then
+        setopt NULL_GLOB 2>/dev/null
+    fi
+}
+
+unset_nullglob() {
+    if [ -n "$BASH_VERSION" ]; then
+        shopt -u nullglob 2>/dev/null
+    elif [ -n "$ZSH_VERSION" ]; then
+        unsetopt NULL_GLOB 2>/dev/null
+    fi
+}
+
 log_to_top() {
     local log_content="$1"
     local temp_log="temp_compress.log"
-    echo -e "$log_content" > "$temp_log"  # 使用 -e 解释换行符
+    echo -e "$log_content" > "$temp_log"
     if [[ -f "$LOGFILE" ]]; then
         cat "$LOGFILE" >> "$temp_log"
     fi
     mv "$temp_log" "$LOGFILE"
 }
 
-# 显示帮助信息
 show_help() {
     echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数] [文件...]"
     echo "选项:"
@@ -72,57 +88,42 @@ show_help() {
     echo "  ${SUPPORTED[PRESETS]} (默认faster)"
     echo "线程数:"
     echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
-    echo "文件:"
-    echo "  可选，指定单独处理的文件（支持通配符）"
     echo "示例:"
-    echo "  # 处理当前目录"
-    echo "  $0 x265 fast mkv"
-    echo "  # 处理指定目录"
-    echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
-    echo "  # 处理指定文件"
-    echo "  $0 a.mp4 b.mkv fast x264"
-    echo "  # 处理以a开头的mp4文件"
-    echo "  $0 x264 a*.mp4"
+    echo "  $0 -d test x265 ultrafast s2 '*.mp4'"
     exit 0
 }
 
-# 参数验证系统
 validate_params() {
     local args=("$@")
     local crf=28
     local preset="faster"
-    local threads=$MAX_THREADS  # 默认使用最大线程
+    local threads=$MAX_THREADS
     local directory="."
     local encoders=()
     local formats=()
-    local files=()  # 新增单独文件列表
+    local files=()
     local position=0
 
     while (( position < ${#args[@]} )); do
         local arg="${args[position]}"
 
         case "$arg" in
-            -h|--help)
-                show_help
-                ;;
+            -h|--help) show_help ;;
             -crf)
                 (( position++ ))
-                [[ -z "${args[position]}" ]] && { echo "错误：-crf 需要参数值"; return 1; }
-                [[ ! "${args[position]}" =~ ^[0-9]+$ ]] && { echo "错误：无效的CRF值 '${args[position]}'"; return 1; }
                 crf="${args[position]}"
+                [[ ! "$crf" =~ ^[0-9]+$ ]] && { echo "错误：无效的CRF值"; return 1; }
                 ;;
             -d)
                 (( position++ ))
-                [[ -z "${args[position]}" ]] && { echo "错误：-d 需要目录参数"; return 1; }
                 directory="${args[position]}"
-                [[ ! -d "$directory" ]] && { echo "错误：目录不存在 '$directory'"; return 1; }
+                [[ ! -d "$directory" ]] && { echo "错误：目录不存在"; return 1; }
+                directory=$(realpath "$directory")
                 ;;
             s*)
                 threads="${arg#s}"
-                [[ ! "$threads" =~ ^[0-9]+$ ]] && { echo "错误：无效的线程数格式 '$arg'"; return 1; }
-                (( threads > MAX_THREADS )) && {
-                    echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"; return 1; }
-                (( threads < 1 )) && { echo "错误：线程数不能小于1"; return 1; }
+                [[ ! "$threads" =~ ^[0-9]+$ ]] && { echo "错误：无效线程数"; return 1; }
+                (( threads = threads > MAX_THREADS ? MAX_THREADS : threads ))
                 ;;
             *)
                 if [[ " ${SUPPORTED[PRESETS]} " =~ " $arg " ]]; then
@@ -132,17 +133,34 @@ validate_params() {
                 elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
                     [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
                 else
-                    # 处理通配符匹配
+                    # 处理通配符匹配（兼容bash/zsh）
+                    local matched_files=()
+                    local need_convert_path=0
+
+                    # 如果指定了目录且目录有效
                     if [[ -n "$directory" && -d "$directory" ]]; then
-                        local matched_files=($(find "$directory" -maxdepth 1 -type f -name "$arg"))
-                        if [[ ${#matched_files[@]} -gt 0 ]]; then
-                            files+=("${matched_files[@]}")
-                        else
-                            echo "警告：未找到匹配的文件 '$arg'"
-                        fi
+                        # 进入目录展开通配符
+                        pushd "$directory" &>/dev/null
+                        set_nullglob
+                        matched_files=($arg)
+                        unset_nullglob
+                        popd &>/dev/null
+                        need_convert_path=1
                     else
-                        echo "错误：无效参数 '$arg'"
-                        return 1
+                        # 在当前目录展开通配符
+                        set_nullglob
+                        matched_files=($arg)
+                        unset_nullglob
+                    fi
+
+                    if [[ ${#matched_files[@]} -gt 0 ]]; then
+                        # 转换相对路径为绝对路径
+                        if (( need_convert_path )); then
+                            matched_files=("${matched_files[@]/#/$directory/}")
+                        fi
+                        files+=("${matched_files[@]}")
+                    else
+                        echo "警告：未找到匹配的文件 '$arg'"
                     fi
                 fi
                 ;;
@@ -154,34 +172,6 @@ validate_params() {
     [[ ${#encoders[@]} -eq 0 ]] && encoders=("x265")
     [[ ${#formats[@]} -eq 0 ]] && formats=("mp4")
 
-    # 编码器CRF范围验证
-    for enc in "${encoders[@]}"; do
-        case $enc in
-            x264)
-                (( crf < 0 || crf > 51 )) && {
-                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X264_CRF]}"
-                    return 1
-                }
-                ;;
-            x265)
-                (( crf < 0 || crf > 51 )) && {
-                    echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X265_CRF]}"
-                    return 1
-                }
-                ;;
-            vp9)
-                (( crf < 0 || crf > 63 )) && {
-                    echo "错误：vp9 的CRF范围应为 ${SUPPORTED[VP9_CRF]}"
-                    return 1
-                }
-                ;;
-        esac
-    done
-
-    # 去重处理
-    encoders=($(printf "%s\n" "${encoders[@]}" | sort -u))
-    formats=($(printf "%s\n" "${formats[@]}" | sort -u))
-
     # 导出验证结果
     declare -g WORK_DIR="$directory"
     declare -g CRF=$crf
@@ -189,26 +179,16 @@ validate_params() {
     declare -g THREADS=$threads
     declare -g ENCODERS=("${encoders[@]}")
     declare -g FORMATS=("${formats[@]}")
-    declare -g FILES=("${files[@]}")  # 新增单独文件列表
+    declare -g FILES=("${files[@]}")
     return 0
 }
 
-# 在 process_file 函数前添加
-echo "==== 调试信息 ===="
-echo "工作目录：$(pwd)"
-echo "视频目录：$WORK_DIR"
-echo "匹配模式：${FILES[@]}"
-echo "实际找到文件："
-find "$WORK_DIR" -maxdepth 1 -type f -name "8*.mp4" -print
-read -n 1 -s -r -p "按任意键继续..."
-
-# 文件处理
 process_file() {
     local src="$1" enc="$2"
-    local base="${src%.*}" ext="${src##*.}"
-    local dest="${base}-${enc}.${ext}"
+    local base=$(basename "${src%.*}")
+    local ext="${src##*.}"
+    local dest="${WORK_DIR}/${base}-${enc}.${ext}"
 
-    # 跳过已处理文件
     if [[ -f "$dest" ]] || [[ "$src" =~ -(x264|x265|vp9)\. ]]; then
         echo "跳过已处理文件：$src" | tee -a "$LOGFILE"
         return
@@ -224,18 +204,9 @@ process_file() {
 
     local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
-        x265)
-            cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
-            cmd+=" -tag:v hvc1 -threads $THREADS"
-            ;;
-        x264)
-            cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
-            cmd+=" -profile:v high -level 4.1 -threads $THREADS"
-            ;;
-        vp9)
-            cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1"
-            (( THREADS > 1 )) && cmd+=" -threads $THREADS"
-            ;;
+        x265) cmd+=" -c:v libx265 -crf $CRF -preset $PRESET -tag:v hvc1 -threads $THREADS" ;;
+        x264) cmd+=" -c:v libx264 -crf $CRF -preset $PRESET -profile:v high -level 4.1 -threads $THREADS" ;;
+        vp9)  cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1 $(( THREADS > 1 ? "-threads $THREADS" : ""))" ;;
     esac
     cmd+=" -c:a copy \"$dest\""
 
@@ -248,12 +219,7 @@ process_file() {
         local end_time=$(date +"%Y-%m-%d %H:%M:%S")
         local duration=$(( $(date +%s) - start ))
 
-        local log="文件：$src\n"
-        log+="开始时间：$start_time\n"
-        log+="结束时间：$end_time\n"
-        log+="耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n"
-        log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
-        log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
+        local log="文件：$src\n开始：$start_time\n结束：$end_time\n耗时：$(printf "%02d:%02d:%02d" $((duration/3600)) $((duration%3600/60)) $((duration%60)))\n原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
         FILE_STATS+=("$log")
     else
         echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
@@ -261,41 +227,19 @@ process_file() {
     fi
 }
 
-# 捕获 Ctrl+C 信号
-handle_interrupt() {
-    echo "中断信号捕获，正在退出脚本..." | tee -a "$LOGFILE"
-    exit 1
-}
-
-# 注册信号处理函数
-trap handle_interrupt SIGINT
-
-# 主函数
 main() {
-    # 参数验证
-    if ! validate_params "$@"; then
-        echo -e "\n支持的编码器：${SUPPORTED[ENCODERS]}" | tee -a "$LOGFILE"
-        echo "支持的文件格式：${SUPPORTED[FORMATS]}" | tee -a "$LOGFILE"
-        echo "支持的编码速度：${SUPPORTED[PRESETS]}" | tee -a "$LOGFILE"
-        echo "最大支持线程数：$MAX_THREADS" | tee -a "$LOGFILE"
-        show_help
-        exit 1
+        # 如果检测到zsh自动切换到bash
+    if [ -n "$ZSH_VERSION" ]; then
+        echo "提示：检测到 zsh 环境，自动切换至 bash 执行" | tee -a "$LOGFILE"
+        exec bash "$0" "$@"
     fi
+    validate_params "$@" || { show_help; exit 1; }
+    cd "$WORK_DIR" || exit 1
 
-    # 切换工作目录
-    cd "$WORK_DIR" || { echo "无法进入目录：$WORK_DIR" | tee -a "$LOGFILE"; exit 1; }
-    echo "工作目录：$(pwd)" | tee -a "$LOGFILE"
-
-    # 执行压缩
     echo "==== 开始处理 ====" | tee -a "$LOGFILE"
-    echo "编码器：${ENCODERS[*]}" | tee -a "$LOGFILE"
-    echo "文件格式：${FORMATS[*]}" | tee -a "$LOGFILE"
-    echo "CRF值：$CRF" | tee -a "$LOGFILE"
-    echo "编码速度：$PRESET" | tee -a "$LOGFILE"
-    echo "使用线程数：$THREADS" | tee -a "$LOGFILE"
-    echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
+    echo "工作目录：$WORK_DIR" | tee -a "$LOGFILE"
 
-    # 如果指定了单独文件，只处理这些文件
+    # 优先处理单独指定的文件
     if [[ ${#FILES[@]} -gt 0 ]]; then
         for file in "${FILES[@]}"; do
             [[ -f "$file" ]] || continue
@@ -304,14 +248,13 @@ main() {
             done
         done
     else
-        # 否则处理指定目录中的文件
+        # 处理格式匹配的文件
         for fmt in "${FORMATS[@]}"; do
-            for file in *."$fmt"; do
-                [[ -f "$file" ]] || continue
+            while IFS= read -r -d $'\0' file; do
                 for enc in "${ENCODERS[@]}"; do
                     process_file "$file" "$enc"
                 done
-            done
+            done < <(find "$WORK_DIR" -maxdepth 1 -type f -name "*.$fmt" -print0)
         done
     fi
 
@@ -321,19 +264,16 @@ main() {
     echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a "$LOGFILE"
     echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a "$LOGFILE"
     echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a "$LOGFILE"
-
-    # 输出总耗时
-    duration=$SECONDS
-    echo -e "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n" | tee -a "$LOGFILE"
+    echo -e "总耗时：$(($SECONDS / 3600))小时$((($SECONDS / 60) % 60))分钟$(($SECONDS % 60))秒\n" | tee -a "$LOGFILE"
 
     # 输出详细统计
-    if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
+    [[ ${#FILE_STATS[@]} -gt 0 ]] && {
         echo -e "==== 详细统计 ====" | tee -a "$LOGFILE"
         for log in "${FILE_STATS[@]}"; do
             echo -e "$log" | tee -a "$LOGFILE"
         done
-    fi
+    }
 }
 
-# 脚本入口
+trap 'echo "中断操作！"; exit 1' SIGINT
 main "$@"
