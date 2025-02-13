@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.9 | 增加 -h 和 --help 参数支持
+# 版本：8.4 | 适用于 zsh 和其他 shell
 ##############################################
 
 SECONDS=0
@@ -73,7 +73,7 @@ show_help() {
     echo "线程数:"
     echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
     echo "文件:"
-    echo "  可选，指定单独处理的文件"
+    echo "  可选，指定单独处理的文件（支持通配符）"
     echo "示例:"
     echo "  # 处理当前目录"
     echo "  $0 x265 fast mkv"
@@ -81,6 +81,8 @@ show_help() {
     echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
     echo "  # 处理指定文件"
     echo "  $0 a.mp4 b.mkv fast x264"
+    echo "  # 处理以a开头的mp4文件"
+    echo "  $0 x264 a*.mp4"
     exit 0
 }
 
@@ -129,11 +131,19 @@ validate_params() {
                     encoders+=("$arg")
                 elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
                     [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
-                elif [[ -f "$directory/$arg" ]]; then  # 检查文件是否存在
-                    files+=("$arg")
                 else
-                    echo "错误：无效参数 '$arg'"
-                    return 1
+                    # 处理通配符匹配
+                    if [[ -n "$directory" && -d "$directory" ]]; then
+                        local matched_files=($(find "$directory" -maxdepth 1 -type f -name "$arg"))
+                        if [[ ${#matched_files[@]} -gt 0 ]]; then
+                            files+=("${matched_files[@]}")
+                        else
+                            echo "警告：未找到匹配的文件 '$arg'"
+                        fi
+                    else
+                        echo "错误：无效参数 '$arg'"
+                        return 1
+                    fi
                 fi
                 ;;
         esac
@@ -182,6 +192,15 @@ validate_params() {
     declare -g FILES=("${files[@]}")  # 新增单独文件列表
     return 0
 }
+
+# 在 process_file 函数前添加
+echo "==== 调试信息 ===="
+echo "工作目录：$(pwd)"
+echo "视频目录：$WORK_DIR"
+echo "匹配模式：${FILES[@]}"
+echo "实际找到文件："
+find "$WORK_DIR" -maxdepth 1 -type f -name "8*.mp4" -print
+read -n 1 -s -r -p "按任意键继续..."
 
 # 文件处理
 process_file() {
@@ -259,7 +278,7 @@ main() {
         echo "支持的文件格式：${SUPPORTED[FORMATS]}" | tee -a "$LOGFILE"
         echo "支持的编码速度：${SUPPORTED[PRESETS]}" | tee -a "$LOGFILE"
         echo "最大支持线程数：$MAX_THREADS" | tee -a "$LOGFILE"
-        show_usage
+        show_help
         exit 1
     fi
 
