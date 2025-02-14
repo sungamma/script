@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.5 | 修复路径处理问题
+# 版本：8.6 | 新增 -r 参数支持通配符模式
 ##############################################
 
 SECONDS=0
@@ -46,7 +46,6 @@ format_bytes() {
     }'
 }
 
-
 # 新增工具函数：兼容不同shell的nullglob设置
 set_nullglob() {
     if [ -n "$BASH_VERSION" ]; then
@@ -80,6 +79,7 @@ show_help() {
     echo "  -h, --help      显示此帮助信息"
     echo "  -crf <数值>     设置压缩质量（默认28）"
     echo "  -d <目录>       指定工作目录（默认当前目录）"
+    echo "  -r <模式>       指定通配符模式（需用引号包裹）"
     echo "编码器:"
     echo "  ${SUPPORTED[ENCODERS]}"
     echo "文件格式:"
@@ -91,14 +91,10 @@ show_help() {
     echo "文件:"
     echo "  可选，指定单独处理的文件（支持通配符）"
     echo "示例:"
-    echo "  # 处理当前目录"
-    echo "  $0 x265 fast mkv"
+    echo "  # 使用-r参数处理通配符"
+    echo "  $0 -r \"5*.mp4 1?.mkv\" x265"
     echo "  # 处理指定目录"
-    echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
-    echo "  # 处理指定文件"
-    echo "  $0 a.mp4 b.mkv fast x264"
-    echo "  # 处理以a开头的mp4文件"
-    echo "  $0 x264 a*.mp4"
+    echo "  $0 -d ~/Videos -r \"*.mp4\" vp9"
     exit 0
 }
 
@@ -111,6 +107,7 @@ validate_params() {
     local encoders=()
     local formats=()
     local files=()
+    local patterns=()
     local position=0
 
     while (( position < ${#args[@]} )); do
@@ -129,6 +126,26 @@ validate_params() {
                 [[ ! -d "$directory" ]] && { echo "错误：目录不存在"; return 1; }
                 directory=$(realpath "$directory")
                 ;;
+            -r)
+                (( position++ ))
+                IFS=' ' read -ra patterns <<< "${args[position]}"
+                for pattern in "${patterns[@]}"; do
+                    # 在指定目录下展开通配符
+                    pushd "$directory" &>/dev/null
+                    set_nullglob
+                    local matched_files=($pattern)
+                    unset_nullglob
+                    popd &>/dev/null
+                    
+                    # 转换相对路径为绝对路径
+                    if [[ ${#matched_files[@]} -gt 0 ]]; then
+                        matched_files=("${matched_files[@]/#/$directory/}")
+                        files+=("${matched_files[@]}")
+                    else
+                        echo "警告：未找到匹配的模式 '$pattern'"
+                    fi
+                done
+                ;;
             s*)
                 threads="${arg#s}"
                 [[ ! "$threads" =~ ^[0-9]+$ ]] && { echo "错误：无效线程数"; return 1; }
@@ -142,13 +159,11 @@ validate_params() {
                 elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
                     [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
                 else
-                    # 处理通配符匹配（兼容bash/zsh）
+                    # 原有文件匹配逻辑保持不变
                     local matched_files=()
                     local need_convert_path=0
 
-                    # 如果指定了目录且目录有效
                     if [[ -n "$directory" && -d "$directory" ]]; then
-                        # 进入目录展开通配符
                         pushd "$directory" &>/dev/null
                         set_nullglob
                         matched_files=($arg)
@@ -156,14 +171,12 @@ validate_params() {
                         popd &>/dev/null
                         need_convert_path=1
                     else
-                        # 在当前目录展开通配符
                         set_nullglob
                         matched_files=($arg)
                         unset_nullglob
                     fi
 
                     if [[ ${#matched_files[@]} -gt 0 ]]; then
-                        # 转换相对路径为绝对路径
                         if (( need_convert_path )); then
                             matched_files=("${matched_files[@]/#/$directory/}")
                         fi
@@ -177,12 +190,11 @@ validate_params() {
         (( position++ ))
     done
 
-    # 后期验证
+    # 后期验证（保持不变）
     [[ ${#encoders[@]} -eq 0 ]] && encoders=("x265")
     [[ ${#formats[@]} -eq 0 ]] && formats=("mp4")
 
-
-    # 编码器CRF范围验证
+    # 编码器CRF范围验证（保持不变）
     for enc in "${encoders[@]}"; do
         case $enc in
             x264)
@@ -206,11 +218,11 @@ validate_params() {
         esac
     done
 
-    # 去重处理
+    # 去重处理（保持不变）
     encoders=($(printf "%s\n" "${encoders[@]}" | sort -u))
     formats=($(printf "%s\n" "${formats[@]}" | sort -u))
 
-    # 导出验证结果
+    # 导出验证结果（保持不变）
     declare -g WORK_DIR="$directory"
     declare -g CRF=$crf
     declare -g PRESET=$preset
