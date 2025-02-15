@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.1.0 | 增加递归深度控制
+# 版本：8.2.0 | 增加交互确认功能
 ##############################################
 
 SECONDS=0
@@ -52,6 +52,7 @@ show_help() {
     echo "选项:"
     echo "  -h, --help      显示此帮助信息"
     echo "  -crf <数值>     设置压缩质量（默认28）"
+    echo "  -y              自动确认，不提示输入"
     echo "  -d <目录>       指定工作目录（默认当前目录）"
     echo "  -depth <数值>   递归深度（0=无限，1=当前目录，2=一级子目录，默认1）"
     echo "  -r <模式...>    递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
@@ -87,6 +88,7 @@ validate_params() {
     declare -g RECURSIVE=0
     declare -ga PATTERNS=()
     declare -gi DEPTH=1 # 默认递归深度为1
+    declare -g SKIP_CONFIRM=0
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -131,6 +133,9 @@ validate_params() {
             }
             IFS=' ' read -ra PATTERNS <<<"${args[position]}"
             RECURSIVE=1
+            ;;
+        -y)
+            SKIP_CONFIRM=1
             ;;
         s*)
             threads="${arg#s}"
@@ -301,14 +306,13 @@ main() {
     echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
     echo "递归深度：$([[ $DEPTH -eq 0 ]] && echo '无限' || echo $DEPTH)" | tee -a "$LOGFILE"
 
+    # 处理逻辑分支
     if [[ $RECURSIVE -eq 1 ]]; then
         echo "递归模式：${PATTERNS[*]}" | tee -a "$LOGFILE"
         find_cmd="find ."
 
-        # 先添加深度控制选项
+        # 构建find命令
         ((DEPTH > 0)) && find_cmd+=" -maxdepth $DEPTH"
-
-        # 再添加其他条件
         find_cmd+=" -type f"
         if [[ ${#PATTERNS[@]} -gt 0 ]]; then
             find_cmd+=" \( "
@@ -320,33 +324,82 @@ main() {
             find_cmd+=" \)"
         fi
         find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
-        # 调试输出开始
-        echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
-        echo "找到的文件列表：" | tee -a "$LOGFILE"
-        # 使用 IFS 和 read 将 find 命令的输出存储到数组并输出以便确认
+
+        # 查找文件并存入数组
         file_array=()
         while IFS= read -r file; do
             file_array+=("$file")
         done < <(eval "$find_cmd")
 
+        # 显示找到的文件
+        echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
+        echo "找到的文件列表：" | tee -a "$LOGFILE"
         for file in "${file_array[@]}"; do
             echo "$file" | tee -a "$LOGFILE"
         done
 
-        # 使用 for 循环遍历数组并调用 process_file
+        # 用户确认
+        if [[ $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "找到以上 ${#file_array[@]} 个文件，是否继续处理？[y/N] " -n 1 -r
+            echo
+            [[ ! $REPLY =~ ^[Yy]$ ]] && {
+                echo "操作已取消" | tee -a "$LOGFILE"
+                exit 0
+            }
+        fi
+
+        # 处理文件
         for file in "${file_array[@]}"; do
-            echo "正在处理文件：$file" | tee -a "$LOGFILE"
-            process_file "$file" "$enc"
+            for enc in "${ENCODERS[@]}"; do
+                process_file "$file" "$enc"
+            done
         done
 
     elif [[ ${#FILES[@]} -gt 0 ]]; then
+        # 显示指定文件
+        echo "指定文件列表：" | tee -a "$LOGFILE"
+        for file in "${FILES[@]}"; do
+            [[ -f "$file" ]] && echo "$file" | tee -a "$LOGFILE"
+        done
+
+        # 用户确认
+        if [[ $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "找到以上 ${#FILES[@]} 个文件，是否继续处理？[y/N] " -n 1 -r
+            echo
+            [[ ! $REPLY =~ ^[Yy]$ ]] && {
+                echo "操作已取消" | tee -a "$LOGFILE"
+                exit 0
+            }
+        fi
+
+        # 处理文件
         for file in "${FILES[@]}"; do
             [[ -f "$file" ]] || continue
             for enc in "${ENCODERS[@]}"; do
                 process_file "$file" "$enc"
             done
         done
+
     else
+        # 显示格式匹配的文件
+        echo "找到的文件列表：" | tee -a "$LOGFILE"
+        for fmt in "${FORMATS[@]}"; do
+            for file in *."$fmt"; do
+                [[ -f "$file" ]] && echo "$file" | tee -a "$LOGFILE"
+            done
+        done
+
+        # 用户确认
+        if [[ $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "找到以上文件，是否继续处理？[y/N] " -n 1 -r
+            echo
+            [[ ! $REPLY =~ ^[Yy]$ ]] && {
+                echo "操作已取消" | tee -a "$LOGFILE"
+                exit 0
+            }
+        fi
+
+        # 处理文件
         for fmt in "${FORMATS[@]}"; do
             for file in *."$fmt"; do
                 [[ -f "$file" ]] || continue
