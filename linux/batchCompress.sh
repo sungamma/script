@@ -103,7 +103,7 @@ validate_params() {
     local position=0
     declare -g RECURSIVE=0
     declare -ga PATTERNS=()
-    declare -gi DEPTH=1 # 默认递归深度为1
+    declare -g DEPTH=1 # 默认递归深度为1
     declare -g SKIP_CONFIRM=0
 
     while ((position < ${#args[@]})); do
@@ -129,45 +129,58 @@ validate_params() {
             }
             directory="${args[position]}"
             ;;
-        -depth)
-            ((position++))
-            [[ $position -ge ${#args[@]} ]] && {
-                echo "错误：-depth 需要参数值"
-                return 1
-            }
-            DEPTH="${args[position]}"
-            if [[ ! "$DEPTH" =~ ^[0-9]+$ ]] || ((DEPTH < 0)); then
-                echo "错误：无效的深度值 '$DEPTH'（必须≥0）"
-                return 1
-            fi
-            ;;
-        -r)
-            ((position++))
-            [[ $position -ge ${#args[@]} ]] && {
-                echo "错误：-r 需要参数值"
-                return 1
-            }
-            IFS=' ' read -ra PATTERNS <<<"${args[position]}"
-            RECURSIVE=1
-            ;;
+-r)
+    ((position++))
+	echo "pois $position"
+    [[ $position -ge ${#args[@]} ]] && {
+        echo "错误：-r 需要参数值"
+        return 1
+    }
+
+    # 检查是否提供递归深度
+    DEPTH="${args[$position]}"
+    if [[ "$DEPTH" =~ ^[0-9]+$ ]]; then
+        ((DEPTH < 0)) && {
+            echo "错误：无效的深度值 '$DEPTH'（必须为非负整数）"
+            return 1
+        }
+        ((position++))  # 移动到下一个参数（文件模式）
+        [[ $position -ge ${#args[@]} ]] && {
+            echo "错误：-r 需要文件模式"
+            return 1
+        }
+    else
+        # 如果参数不是数字，则默认为深度1，当前参数是文件模式
+        DEPTH=1
+    fi
+
+    # 读取文件模式
+    IFS=' ' read -ra PATTERNS <<<"${args[position]}"
+    RECURSIVE=1
+    ;;
         -y)
             SKIP_CONFIRM=1
             ;;
-        s*)
-            threads="${arg#s}"
-            [[ ! "$threads" =~ ^[0-9]+$ ]] && {
-                echo "错误：无效的线程数格式 '$arg'"
-                return 1
-            }
-            ((threads > MAX_THREADS)) && {
-                echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"
-                return 1
-            }
-            ((threads < 1)) && {
-                echo "错误：线程数不能小于1"
-                return 1
-            }
-            ;;
+-s)
+    ((position++))
+    [[ $position -ge ${#args[@]} ]] && {
+        echo "错误：-s 需要参数值"
+        return 1
+    }
+    threads="${args[position]}"
+    [[ ! "$threads" =~ ^[0-9]+$ ]] && {
+        echo "错误：无效的线程数格式 '$threads'"
+        return 1
+    }
+    ((threads > MAX_THREADS)) && {
+        echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"
+        return 1
+    }
+    ((threads < 1)) && {
+        echo "错误：线程数不能小于1"
+        return 1
+    }
+    ;;
         *)
             if [[ " ${SUPPORTED[PRESETS]} " =~ " $arg " ]]; then
                 preset="$arg"
@@ -339,9 +352,10 @@ main() {
             done
             find_cmd+=" \)"
         fi
-        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
+#        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
 
-         
+        # 查找文件并存入数组
+ 
 # 读取文件并过滤非视频格式
 file_array=()
 while IFS= read -r file; do
@@ -352,13 +366,14 @@ while IFS= read -r file; do
     # 检查是否为支持的视频格式
     if [[ " ${SUPPORTED[FORMATS]} " =~ " $ext " ]]; then
         file_array+=("$file")
+    else
+        echo "跳过非视频文件: $file" | tee -a "$LOGFILE"
     fi
 done < <(eval "$find_cmd")
  
-
         # 显示找到的文件
         echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
-        echo "找到的视频文件列表：" | tee -a "$LOGFILE"
+        echo "找到的文件列表：" | tee -a "$LOGFILE"
         for file in "${file_array[@]}"; do
             echo "$file" | tee -a "$LOGFILE"
         done
