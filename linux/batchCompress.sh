@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.2.0 | 增加交互确认功能
+# 版本：8.3.0 | 完善帮助，增加交互确认功能
 ##############################################
 
 SECONDS=0
@@ -46,33 +46,51 @@ format_bytes() {
     }'
 }
 
+ 
 # 显示帮助信息
 show_help() {
-    echo "用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数] [文件...]"
-    echo "选项:"
-    echo "  -h, --help      显示此帮助信息"
-    echo "  -crf <数值>     设置压缩质量（默认28）"
-    echo "  -y              自动确认，不提示输入"
-    echo "  -d <目录>       指定工作目录（默认当前目录）"
-    echo "  -depth <数值>   递归深度（0=无限，1=当前目录，2=一级子目录，默认1）"
-    echo "  -r <模式...>    递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
-    echo "编码器:"
-    echo "  ${SUPPORTED[ENCODERS]}"
-    echo "文件格式:"
-    echo "  all 或 ${SUPPORTED[FORMATS]}"
-    echo "编码速度:"
-    echo "  ${SUPPORTED[PRESETS]} (默认faster)"
-    echo "线程数:"
-    echo "  s1|s2|s3... (默认使用全部 $MAX_THREADS 线程)"
-    echo "文件:"
-    echo "  可选，指定单独处理的文件"
-    echo "示例:"
-    echo "  # 处理当前目录及一级子目录"
-    echo "  $0 -depth 2 -r \"*.mp4\" x265"
-    echo "  # 无限递归处理所有子目录"
-    echo "  $0 -depth 0 -r \"*.mkv\" vp9"
+    # 颜色定义
+    local RED='\033[0;31m'
+    local GREEN='\033[0;32m'
+    local YELLOW='\033[0;33m'
+    local BLUE='\033[0;34m'
+    local MAGENTA='\033[0;35m'
+    local CYAN='\033[0;36m'
+    local RESET='\033[0m' # 重置颜色
+
+    echo -e "${GREEN}用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [s线程数] [文件...]${RESET}"
+    echo -e "${CYAN}说明:${RESET}"
+    echo -e "  ${BLUE}1. 参数顺序可变${RESET}：选项、编码器、速度等参数可以任意顺序排列"
+    echo -e "  ${BLUE}2. 特殊字符匹配${RESET}：指定文件时可使用通配符（如 \"1?.mp4\"），但需要加引号"
+    echo -e "${CYAN}选项:${RESET}"
+    echo -e "  ${YELLOW}-h, --help      ${RESET}显示此帮助信息"
+    echo -e "  ${YELLOW}-crf <数值>     ${RESET}设置压缩质量（默认：x264=25, x265=28, vp9=30）"
+    echo -e "  ${YELLOW}-y              ${RESET}自动确认，不提示输入"
+    echo -e "  ${YELLOW}-d <目录>       ${RESET}指定工作目录（默认当前目录）"
+    echo -e "  ${YELLOW}-depth <数值>   ${RESET}递归深度（0=无限，1=当前目录，2=一级子目录，默认1）"
+    echo -e "  ${YELLOW}-r <模式...>    ${RESET}递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
+    echo -e "${CYAN}编码器:${RESET}"
+    echo -e "  ${MAGENTA}${SUPPORTED[ENCODERS]}${RESET}"
+    echo -e "${CYAN}文件格式:${RESET}"
+    echo -e "  ${MAGENTA}all 或 ${SUPPORTED[FORMATS]}${RESET}"
+    echo -e "${CYAN}编码速度:${RESET}"
+    echo -e "  ${MAGENTA}${SUPPORTED[PRESETS]} ${RESET}(默认${GREEN}faster${RESET})"
+    echo -e "${CYAN}线程数:${RESET}"
+    echo -e "  ${MAGENTA}s1|s2|s3... ${RESET}(默认使用全部 ${GREEN}$MAX_THREADS${RESET} 线程)"
+    echo -e "${CYAN}文件:${RESET}"
+    echo -e "  可选，指定单独处理的文件（支持通配符，如 \"1?.mp4\"，需要加引号）"
+    echo -e "${CYAN}示例:${RESET}"
+    echo -e "  # 处理当前目录及一级子目录"
+    echo -e "  ${GREEN}$0 -depth 2 -r \"*.mp4\" x265${RESET}"
+    echo -e "  # 无限递归处理所有子目录"
+    echo -e "  ${GREEN}$0 -depth 0 -r \"*.mkv\" vp9 -crf 35${RESET}"
+    echo -e "  # 使用x264编码器，设置CRF为23"
+    echo -e "  ${GREEN}$0 x264 -crf 23 fast s2${RESET}"
+    echo -e "  # 处理特殊字符文件名"
+    echo -e "  ${GREEN}$0 \"1?.mp4\" x265${RESET}"
     exit 0
 }
+ 
 
 # 参数验证系统
 validate_params() {
