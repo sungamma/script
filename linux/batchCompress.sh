@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.9.1 | 增加 -h 和 --help 参数支持
+# 版本：7.9.3 | 修复递归模式和多模式匹配
 ##############################################
 
 SECONDS=0
@@ -53,6 +53,7 @@ show_help() {
     echo "  -h, --help      显示此帮助信息"
     echo "  -crf <数值>     设置压缩质量（默认28）"
     echo "  -d <目录>       指定工作目录（默认当前目录）"
+    echo "  -r <模式...>    递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
     echo "编码器:"
     echo "  ${SUPPORTED[ENCODERS]}"
     echo "文件格式:"
@@ -78,12 +79,14 @@ validate_params() {
     local args=("$@")
     local crf=28
     local preset="faster"
-    local threads=$MAX_THREADS # 默认使用最大线程
+    local threads=$MAX_THREADS
     local directory="."
     local encoders=()
     local formats=()
-    local files=() # 新增单独文件列表
+    local files=()
     local position=0
+    declare -g RECURSIVE=0
+    declare -ga PATTERNS=()
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -94,27 +97,28 @@ validate_params() {
             ;;
         -crf)
             ((position++))
-            [[ -z "${args[position]}" ]] && {
+            [[ $position -ge ${#args[@]} ]] && {
                 echo "错误：-crf 需要参数值"
-                return 1
-            }
-            [[ ! "${args[position]}" =~ ^[0-9]+$ ]] && {
-                echo "错误：无效的CRF值 '${args[position]}'"
                 return 1
             }
             crf="${args[position]}"
             ;;
         -d)
             ((position++))
-            [[ -z "${args[position]}" ]] && {
-                echo "错误：-d 需要目录参数"
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-d 需要参数值"
                 return 1
             }
             directory="${args[position]}"
-            [[ ! -d "$directory" ]] && {
-                echo "错误：目录不存在 '$directory'"
+            ;;
+        -r)
+            ((position++))
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-r 需要参数值"
                 return 1
             }
+            IFS=' ' read -ra PATTERNS <<< "${args[position]}"
+            RECURSIVE=1
             ;;
         s*)
             threads="${arg#s}"
@@ -138,7 +142,7 @@ validate_params() {
                 encoders+=("$arg")
             elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
                 [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
-            elif [[ -f "$directory/$arg" ]]; then # 检查文件是否存在
+            elif [[ -f "$directory/$arg" || -f "$arg" ]]; then
                 files+=("$arg")
             else
                 echo "错误：无效参数 '$arg'"
@@ -157,21 +161,21 @@ validate_params() {
     for enc in "${encoders[@]}"; do
         case $enc in
         x264)
-            crf=${crf:-25} # 默认值为25
+            crf=${crf:-25}
             ((crf < 0 || crf > 51)) && {
                 echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X264_CRF]}"
                 return 1
             }
             ;;
         x265)
-            crf=${crf:-28} # 默认值为28
+            crf=${crf:-28}
             ((crf < 0 || crf > 51)) && {
                 echo "错误：$enc 的CRF范围应为 ${SUPPORTED[X265_CRF]}"
                 return 1
             }
             ;;
         vp9)
-            crf=${crf:-30} # 默认值为30
+            crf=${crf:-30}
             ((crf < 0 || crf > 63)) && {
                 echo "错误：vp9 的CRF范围应为 ${SUPPORTED[VP9_CRF]}"
                 return 1
@@ -191,7 +195,9 @@ validate_params() {
     declare -g THREADS=$threads
     declare -g ENCODERS=("${encoders[@]}")
     declare -g FORMATS=("${formats[@]}")
-    declare -g FILES=("${files[@]}") # 新增单独文件列表
+    declare -g FILES=("${files[@]}")
+    declare -g RECURSIVE
+    declare -ga PATTERNS
     return 0
 }
 
@@ -215,7 +221,7 @@ process_file() {
     echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
     echo "开始时间：$start_time" | tee -a "$LOGFILE"
 
-    local cmd="ffmpeg7 -hide_banner -i \"$src\""
+    local cmd="ffmpeg -hide_banner -i \"$src\""
     case "$enc" in
     x265)
         cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
@@ -262,7 +268,6 @@ main() {
         echo "支持的文件格式：${SUPPORTED[FORMATS]}" | tee -a "$LOGFILE"
         echo "支持的编码速度：${SUPPORTED[PRESETS]}" | tee -a "$LOGFILE"
         echo "最大支持线程数：$MAX_THREADS" | tee -a "$LOGFILE"
-        show_usage
         exit 1
     fi
 
@@ -282,8 +287,19 @@ main() {
     echo "使用线程数：$THREADS" | tee -a "$LOGFILE"
     echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
 
-    # 如果指定了单独文件，只处理这些文件
-    if [[ ${#FILES[@]} -gt 0 ]]; then
+    if [[ $RECURSIVE -eq 1 ]]; then
+        echo "递归模式：${PATTERNS[*]}" | tee -a "$LOGFILE"
+        find_cmd="find . -type f"
+        if [[ ${#PATTERNS[@]} -gt 0 ]]; then
+            find_cmd+=" $$ -name \"${PATTERNS}\""             for ((i=1; i<${#PATTERNS[@]}; i++)); do                 find_cmd+=" -o -name \"${PATTERNS[$i]}\""             done             find_cmd+=" $$"
+        fi
+        echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
+        while IFS= read -r -d $'\0' file; do
+            for enc in "${ENCODERS[@]}"; do
+                process_file "$file" "$enc"
+            done
+        done < <(eval "$find_cmd -print0 2>/dev/null")
+    elif [[ ${#FILES[@]} -gt 0 ]]; then
         for file in "${FILES[@]}"; do
             [[ -f "$file" ]] || continue
             for enc in "${ENCODERS[@]}"; do
@@ -291,7 +307,6 @@ main() {
             done
         done
     else
-        # 否则处理指定目录中的文件
         for fmt in "${FORMATS[@]}"; do
             for file in *."$fmt"; do
                 [[ -f "$file" ]] || continue
@@ -308,7 +323,6 @@ main() {
     echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a "$LOGFILE"
     echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a "$LOGFILE"
     echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a "$LOGFILE"
-    # 总计压缩率
     if [[ $TOTAL_ORIGIN -gt 0 ]]; then
         echo "压缩率：$(awk "BEGIN {printf \"%.2f\", ($TOTAL_ORIGIN - $TOTAL_COMPRESSED)/$TOTAL_ORIGIN*100}")%" | tee -a "$LOGFILE"
     fi
