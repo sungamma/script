@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.0.0 | 修复递归模式和多模式匹配
+# 版本：8.1.0 | 增加递归深度控制
 ##############################################
 
 SECONDS=0
@@ -53,6 +53,7 @@ show_help() {
     echo "  -h, --help      显示此帮助信息"
     echo "  -crf <数值>     设置压缩质量（默认28）"
     echo "  -d <目录>       指定工作目录（默认当前目录）"
+    echo "  -depth <数值>   递归深度（0=无限，1=当前目录，2=一级子目录，默认1）"
     echo "  -r <模式...>    递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
     echo "编码器:"
     echo "  ${SUPPORTED[ENCODERS]}"
@@ -65,12 +66,10 @@ show_help() {
     echo "文件:"
     echo "  可选，指定单独处理的文件"
     echo "示例:"
-    echo "  # 处理当前目录"
-    echo "  $0 x265 fast mkv"
-    echo "  # 处理指定目录"
-    echo "  $0 -d ~/Videos all vp9 -crf 30 medium s4"
-    echo "  # 处理指定文件"
-    echo "  $0 a.mp4 b.mkv fast x264"
+    echo "  # 处理当前目录及一级子目录"
+    echo "  $0 -depth 2 -r \"*.mp4\" x265"
+    echo "  # 无限递归处理所有子目录"
+    echo "  $0 -depth 0 -r \"*.mkv\" vp9"
     exit 0
 }
 
@@ -87,6 +86,7 @@ validate_params() {
     local position=0
     declare -g RECURSIVE=0
     declare -ga PATTERNS=()
+    declare -gi DEPTH=1 # 默认递归深度为1
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -110,6 +110,18 @@ validate_params() {
                 return 1
             }
             directory="${args[position]}"
+            ;;
+        -depth)
+            ((position++))
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-depth 需要参数值"
+                return 1
+            }
+            DEPTH="${args[position]}"
+            if [[ ! "$DEPTH" =~ ^[0-9]+$ ]] || ((DEPTH < 0)); then
+                echo "错误：无效的深度值 '$DEPTH'（必须≥0）"
+                return 1
+            fi
             ;;
         -r)
             ((position++))
@@ -198,6 +210,7 @@ validate_params() {
     declare -g FILES=("${files[@]}")
     declare -g RECURSIVE
     declare -ga PATTERNS
+    declare -g DEPTH
     return 0
 }
 
@@ -286,10 +299,17 @@ main() {
     echo "编码速度：$PRESET" | tee -a "$LOGFILE"
     echo "使用线程数：$THREADS" | tee -a "$LOGFILE"
     echo "CPU最大线程数：$MAX_THREADS" | tee -a "$LOGFILE"
+    echo "递归深度：$([[ $DEPTH -eq 0 ]] && echo '无限' || echo $DEPTH)" | tee -a "$LOGFILE"
 
     if [[ $RECURSIVE -eq 1 ]]; then
         echo "递归模式：${PATTERNS[*]}" | tee -a "$LOGFILE"
-        find_cmd="find . -type f"
+        find_cmd="find ."
+
+        # 先添加深度控制选项
+        ((DEPTH > 0)) && find_cmd+=" -maxdepth $DEPTH"
+
+        # 再添加其他条件
+        find_cmd+=" -type f"
         if [[ ${#PATTERNS[@]} -gt 0 ]]; then
             find_cmd+=" \( "
             for ((i = 0; i < ${#PATTERNS[@]}; i++)); do
