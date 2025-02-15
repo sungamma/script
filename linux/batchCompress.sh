@@ -46,7 +46,6 @@ format_bytes() {
     }'
 }
 
- 
 # 显示帮助信息
 show_help() {
     # 颜色定义
@@ -90,7 +89,6 @@ show_help() {
     echo -e "  ${GREEN}$0 \"1?.mp4\" x265${RESET}"
     exit 0
 }
- 
 
 # 参数验证系统
 validate_params() {
