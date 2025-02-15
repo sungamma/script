@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：7.9.3 | 修复递归模式和多模式匹配
+# 版本：8.0.0 | 修复递归模式和多模式匹配
 ##############################################
 
 SECONDS=0
@@ -117,7 +117,7 @@ validate_params() {
                 echo "错误：-r 需要参数值"
                 return 1
             }
-            IFS=' ' read -ra PATTERNS <<< "${args[position]}"
+            IFS=' ' read -ra PATTERNS <<<"${args[position]}"
             RECURSIVE=1
             ;;
         s*)
@@ -221,7 +221,7 @@ process_file() {
     echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
     echo "开始时间：$start_time" | tee -a "$LOGFILE"
 
-    local cmd="ffmpeg -hide_banner -i \"$src\""
+    local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
     x265)
         cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
@@ -291,14 +291,34 @@ main() {
         echo "递归模式：${PATTERNS[*]}" | tee -a "$LOGFILE"
         find_cmd="find . -type f"
         if [[ ${#PATTERNS[@]} -gt 0 ]]; then
-            find_cmd+=" $$ -name \"${PATTERNS}\""             for ((i=1; i<${#PATTERNS[@]}; i++)); do                 find_cmd+=" -o -name \"${PATTERNS[$i]}\""             done             find_cmd+=" $$"
-        fi
-        echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
-        while IFS= read -r -d $'\0' file; do
-            for enc in "${ENCODERS[@]}"; do
-                process_file "$file" "$enc"
+            find_cmd+=" \( "
+            for ((i = 0; i < ${#PATTERNS[@]}; i++)); do
+                pattern=${PATTERNS[$i]}
+                [[ $i -gt 0 ]] && find_cmd+=" -o "
+                find_cmd+=" -name \"$pattern\""
             done
-        done < <(eval "$find_cmd -print0 2>/dev/null")
+            find_cmd+=" \)"
+        fi
+        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
+        # 调试输出开始
+        echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
+        echo "找到的文件列表：" | tee -a "$LOGFILE"
+        # 使用 IFS 和 read 将 find 命令的输出存储到数组并输出以便确认
+        file_array=()
+        while IFS= read -r file; do
+            file_array+=("$file")
+        done < <(eval "$find_cmd")
+
+        for file in "${file_array[@]}"; do
+            echo "$file" | tee -a "$LOGFILE"
+        done
+
+        # 使用 for 循环遍历数组并调用 process_file
+        for file in "${file_array[@]}"; do
+            echo "正在处理文件：$file" | tee -a "$LOGFILE"
+            process_file "$file" "$enc"
+        done
+
     elif [[ ${#FILES[@]} -gt 0 ]]; then
         for file in "${FILES[@]}"; do
             [[ -f "$file" ]] || continue
