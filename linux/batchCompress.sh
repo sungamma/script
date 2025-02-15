@@ -341,15 +341,24 @@ main() {
         fi
         find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
 
-        # 查找文件并存入数组
-        file_array=()
-        while IFS= read -r file; do
-            file_array+=("$file")
-        done < <(eval "$find_cmd")
+         
+# 读取文件并过滤非视频格式
+file_array=()
+while IFS= read -r file; do
+    # 获取文件扩展名并转换为小写
+    local ext="${file##*.}"
+    ext="${ext,,}"
+
+    # 检查是否为支持的视频格式
+    if [[ " ${SUPPORTED[FORMATS]} " =~ " $ext " ]]; then
+        file_array+=("$file")
+    fi
+done < <(eval "$find_cmd")
+ 
 
         # 显示找到的文件
         echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
-        echo "找到的文件列表：" | tee -a "$LOGFILE"
+        echo "找到的视频文件列表：" | tee -a "$LOGFILE"
         for file in "${file_array[@]}"; do
             echo "$file" | tee -a "$LOGFILE"
         done
