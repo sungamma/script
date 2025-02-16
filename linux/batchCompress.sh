@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.3.0 | 完善帮助，增加交互确认功能
+# 版本：8.4.0 | 完善帮助，增加交互确认功能
 ##############################################
 
 SECONDS=0
@@ -66,8 +66,7 @@ show_help() {
     echo -e "  ${YELLOW}-crf <数值>     ${RESET}设置压缩质量（默认：x264=25, x265=28, vp9=30）"
     echo -e "  ${YELLOW}-y              ${RESET}自动确认，不提示输入"
     echo -e "  ${YELLOW}-d <目录>       ${RESET}指定工作目录（默认当前目录）"
-    echo -e "  ${YELLOW}-depth <数值>   ${RESET}递归深度（0=无限，1=当前目录，2=一级子目录，默认1）"
-    echo -e "  ${YELLOW}-r <模式...>    ${RESET}递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
+    echo -e "  ${YELLOW}-r <数值>  <模式...>    ${RESET}递归深度（0=无限，1=当前目录，2=一级子目录，默认1）,递归处理匹配模式的文件（例如：\"*.mp4 *.mkv\"）"
     echo -e "${CYAN}编码器:${RESET}"
     echo -e "  ${MAGENTA}${SUPPORTED[ENCODERS]}${RESET}"
     echo -e "${CYAN}文件格式:${RESET}"
@@ -80,9 +79,11 @@ show_help() {
     echo -e "  可选，指定单独处理的文件（支持通配符，如 \"1?.mp4\"，需要加引号）"
     echo -e "${CYAN}示例:${RESET}"
     echo -e "  # 处理当前目录及一级子目录"
-    echo -e "  ${GREEN}$0 -depth 2 -r \"*.mp4\" x265${RESET}"
+    echo -e "  ${GREEN}$0 -r 2 \"*.mp4\" x265${RESET}"
+    echo -e "  # 处理当前目录下5开头的mp4文件和6开头的mkv文件"
+    echo -e "  ${GREEN}$0 -r  \"5*.mp4 6*.mkv\" x265${RESET}"
     echo -e "  # 无限递归处理所有子目录"
-    echo -e "  ${GREEN}$0 -depth 0 -r \"*.mkv\" vp9 -crf 35${RESET}"
+    echo -e "  ${GREEN}$0 -r 0 \"*.mkv\" vp9 -crf 35${RESET}"
     echo -e "  # 使用x264编码器，设置CRF为23"
     echo -e "  ${GREEN}$0 x264 -crf 23 fast s2${RESET}"
     echo -e "  # 处理特殊字符文件名"
@@ -129,58 +130,57 @@ validate_params() {
             }
             directory="${args[position]}"
             ;;
--r)
-    ((position++))
-	echo "pois $position"
-    [[ $position -ge ${#args[@]} ]] && {
-        echo "错误：-r 需要参数值"
-        return 1
-    }
+        -r)
+            ((position++))
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-r 需要参数值"
+                return 1
+            }
 
-    # 检查是否提供递归深度
-    DEPTH="${args[$position]}"
-    if [[ "$DEPTH" =~ ^[0-9]+$ ]]; then
-        ((DEPTH < 0)) && {
-            echo "错误：无效的深度值 '$DEPTH'（必须为非负整数）"
-            return 1
-        }
-        ((position++))  # 移动到下一个参数（文件模式）
-        [[ $position -ge ${#args[@]} ]] && {
-            echo "错误：-r 需要文件模式"
-            return 1
-        }
-    else
-        # 如果参数不是数字，则默认为深度1，当前参数是文件模式
-        DEPTH=1
-    fi
+            # 检查是否提供递归深度
+            DEPTH="${args[$position]}"
+            if [[ "$DEPTH" =~ ^[0-9]+$ ]]; then
+                ((DEPTH < 0)) && {
+                    echo "错误：无效的深度值 '$DEPTH'（必须为非负整数）"
+                    return 1
+                }
+                ((position++)) # 移动到下一个参数（文件模式）
+                [[ $position -ge ${#args[@]} ]] && {
+                    echo "错误：-r 需要文件模式"
+                    return 1
+                }
+            else
+                # 如果参数不是数字，则默认为深度1，当前参数是文件模式
+                DEPTH=1
+            fi
 
-    # 读取文件模式
-    IFS=' ' read -ra PATTERNS <<<"${args[position]}"
-    RECURSIVE=1
-    ;;
+            # 读取文件模式
+            IFS=' ' read -ra PATTERNS <<<"${args[position]}"
+            RECURSIVE=1
+            ;;
         -y)
             SKIP_CONFIRM=1
             ;;
--s)
-    ((position++))
-    [[ $position -ge ${#args[@]} ]] && {
-        echo "错误：-s 需要参数值"
-        return 1
-    }
-    threads="${args[position]}"
-    [[ ! "$threads" =~ ^[0-9]+$ ]] && {
-        echo "错误：无效的线程数格式 '$threads'"
-        return 1
-    }
-    ((threads > MAX_THREADS)) && {
-        echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"
-        return 1
-    }
-    ((threads < 1)) && {
-        echo "错误：线程数不能小于1"
-        return 1
-    }
-    ;;
+        -s)
+            ((position++))
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-s 需要参数值"
+                return 1
+            }
+            threads="${args[position]}"
+            [[ ! "$threads" =~ ^[0-9]+$ ]] && {
+                echo "错误：无效的线程数格式 '$threads'"
+                return 1
+            }
+            ((threads > MAX_THREADS)) && {
+                echo "错误：线程数超过最大值（最大支持 $MAX_THREADS 线程）"
+                return 1
+            }
+            ((threads < 1)) && {
+                echo "错误：线程数不能小于1"
+                return 1
+            }
+            ;;
         *)
             if [[ " ${SUPPORTED[PRESETS]} " =~ " $arg " ]]; then
                 preset="$arg"
@@ -352,25 +352,22 @@ main() {
             done
             find_cmd+=" \)"
         fi
-#        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
+        #        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
 
-        # 查找文件并存入数组
- 
-# 读取文件并过滤非视频格式
-file_array=()
-while IFS= read -r file; do
-    # 获取文件扩展名并转换为小写
-    local ext="${file##*.}"
-    ext="${ext,,}"
+        # 读取文件并过滤非视频格式
+        file_array=()
+        while IFS= read -r file; do
+            # 获取文件扩展名并转换为小写
+            local ext="${file##*.}"
+            ext="${ext,,}"
 
-    # 检查是否为支持的视频格式
-    if [[ " ${SUPPORTED[FORMATS]} " =~ " $ext " ]]; then
-        file_array+=("$file")
-    else
-        echo "跳过非视频文件: $file" | tee -a "$LOGFILE"
-    fi
-done < <(eval "$find_cmd")
- 
+            # 检查是否为支持的视频格式
+            if [[ " ${SUPPORTED[FORMATS]} " =~ " $ext " ]]; then
+                file_array+=("$file")
+            else
+                echo "跳过非视频文件: $file" | tee -a "$LOGFILE"
+            fi
+        done < <(eval "$find_cmd")
         # 显示找到的文件
         echo "执行查找命令：$find_cmd" | tee -a "$LOGFILE"
         echo "找到的文件列表：" | tee -a "$LOGFILE"
