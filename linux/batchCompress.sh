@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.4.0 | 完善帮助，增加交互确认功能
+# 版本：8.5.0 | 完善帮助，增加交互确认功能
 ##############################################
 
 SECONDS=0
@@ -264,8 +264,8 @@ process_file() {
     local orig_size=$(stat -c%s "$src")
     ((TOTAL_FILES++))
 
-    echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
-    echo "开始时间：$start_time" | tee -a "$LOGFILE"
+    # echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
+    # echo "开始时间：$start_time" | tee -a "$LOGFILE"
 
     local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
@@ -418,16 +418,18 @@ main() {
 
     else
         # 显示格式匹配的文件
+        fileNum=0
         echo "找到的文件列表：" | tee -a "$LOGFILE"
         for fmt in "${FORMATS[@]}"; do
             for file in *."$fmt"; do
                 [[ -f "$file" ]] && echo "$file" | tee -a "$LOGFILE"
+                [[ -f "$file" ]] && ((fileNum++))
             done
         done
 
         # 用户确认
         if [[ $SKIP_CONFIRM -eq 0 ]]; then
-            read -p "找到以上文件，是否继续处理？[y/N] " -n 1 -r
+            read -p "找到以上 $fileNum 个文件，是否继续处理？[y/N] " -n 1 -r
             echo
             [[ ! $REPLY =~ ^[Yy]$ ]] && {
                 echo "操作已取消" | tee -a "$LOGFILE"
@@ -445,20 +447,8 @@ main() {
             done
         done
     fi
-
-    # 生成报告
-    echo -e "\n==== 处理完成 ====" | tee -a "$LOGFILE"
-    echo "已处理：$PROCESSED/$TOTAL_FILES" | tee -a "$LOGFILE"
-    echo "原始总量：$(format_bytes $TOTAL_ORIGIN)" | tee -a "$LOGFILE"
-    echo "压缩总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a "$LOGFILE"
-    echo "节省空间：$(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a "$LOGFILE"
-    if [[ $TOTAL_ORIGIN -gt 0 ]]; then
-        echo "压缩率：$(awk "BEGIN {printf \"%.2f\", ($TOTAL_ORIGIN - $TOTAL_COMPRESSED)/$TOTAL_ORIGIN*100}")%" | tee -a "$LOGFILE"
-    fi
-
-    # 输出总耗时
+    # 统计总耗时
     duration=$SECONDS
-    echo -e "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n" | tee -a "$LOGFILE"
 
     # 输出详细统计
     if [[ ${#FILE_STATS[@]} -gt 0 ]]; then
@@ -467,6 +457,17 @@ main() {
             echo -e "$log" | tee -a "$LOGFILE"
         done
     fi
+    # 生成报告
+    echo -e "\n==== 处理完成 ====" | tee -a "$LOGFILE"
+    echo "已处理：    $PROCESSED/$TOTAL_FILES" | tee -a "$LOGFILE"
+    echo "原始总量：  $(format_bytes $TOTAL_ORIGIN)" | tee -a "$LOGFILE"
+    echo "压缩后总量：$(format_bytes $TOTAL_COMPRESSED)" | tee -a "$LOGFILE"
+    echo "节省空间：  $(format_bytes $((TOTAL_ORIGIN - TOTAL_COMPRESSED)))" | tee -a "$LOGFILE"
+    if [[ $TOTAL_ORIGIN -gt 0 ]]; then
+        echo "压缩率：$(awk "BEGIN {printf \"%.2f\", ($TOTAL_ORIGIN - $TOTAL_COMPRESSED)/$TOTAL_ORIGIN*100}")%" | tee -a "$LOGFILE"
+    fi
+    # 输出总耗时
+    echo -e "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n" | tee -a "$LOGFILE"
 }
 
 trap 'echo "中断操作！"; exit 1' SIGINT
