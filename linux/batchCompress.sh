@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：8.5.0 | 完善帮助，增加交互确认功能
+# 版本：9.0.0 | 增加自动移动原文件到 originals_bak 文件夹
 ##############################################
 
 SECONDS=0
@@ -16,7 +16,6 @@ declare -A SUPPORTED=(
     ["X265_CRF"]="0-51"
     ["VP9_CRF"]="0-63"
 )
-
 # 获取CPU信息
 MAX_THREADS=$(nproc)
 declare -i MAX_THREADS
@@ -64,8 +63,9 @@ show_help() {
     echo -e "${CYAN}选项:${RESET}"
     echo -e "  ${YELLOW}-h, --help      ${RESET}显示此帮助信息"
     echo -e "  ${YELLOW}-crf <数值>     ${RESET}设置压缩质量（默认：x264=25, x265=28, vp9=30）"
+    echo -e "  ${YELLOW}-m              ${RESET}自动移动原文件到 originals_bak 文件夹"
     echo -e "  ${YELLOW}-s <数值>       ${RESET}设置线程数(默认使用全部 ${GREEN}$MAX_THREADS${RESET} 线程)"
-    echo -e "  ${YELLOW}-y              ${RESET}自动确认，不提示输入"
+    echo -e "  ${YELLOW}-y              ${RESET}自动确认源文件，不提示输入，若需无人值守运行，请使用-y选项及-m选项"
     echo -e "  ${YELLOW}-d <目录>       ${RESET}指定工作目录（默认当前目录）"
     echo -e "  ${YELLOW}-r <深度>  <通配符文件>    ${RESET}递归深度（0=无限，1=当前目录，2=一级子目录，默认1）,递归处理匹配通配符文件（例如：\"*.mp4 *.mkv\"）"
     echo -e "${CYAN}编码器:${RESET}"
@@ -105,6 +105,7 @@ validate_params() {
     declare -ga PATTERNS=()
     declare -g DEPTH=1 # 默认递归深度为1
     declare -g SKIP_CONFIRM=0
+    declare -g MOVE_FILES=0
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -159,6 +160,9 @@ validate_params() {
             ;;
         -y)
             SKIP_CONFIRM=1
+            ;;
+        -m)
+            MOVE_FILES=1
             ;;
         -s)
             ((position++))
@@ -300,6 +304,33 @@ process_file() {
         log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
         log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
         FILE_STATS+=("$log")
+
+        if [[ $MOVE_FILES -eq 1 ]]; then
+            # 移动原文件逻辑
+            local file_dir=$(dirname "$src")
+            local dest_dir="${file_dir}/originals_bak"
+            local dest_path="${dest_dir}/$(basename "$src")" # 完整目标路径
+
+            # 创建目标目录
+            mkdir -p "$dest_dir" || {
+                echo "[错误] 无法创建目录：$dest_dir" | tee -a "$LOGFILE"
+                return 1
+            }
+
+            # 检测目标文件是否已存在
+            if [[ -f "$dest_path" ]]; then
+                echo "[警告] 跳过移动：$dest_path 已存在" | tee -a "$LOGFILE"
+                return 1
+            fi
+
+            # 执行移动
+            if mv -n "$src" "$dest_dir/"; then
+                echo "原文件已移动至：$dest_path" | tee -a "$LOGFILE"
+            else
+                echo "[错误] 文件移动失败：$src → $dest_dir/" | tee -a "$LOGFILE"
+                return 1
+            fi
+        fi
     else
         echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
         rm -f "$dest"
@@ -322,7 +353,7 @@ main() {
         echo "无法进入目录：$WORK_DIR" | tee -a "$LOGFILE"
         exit 1
     }
-    echo "工作目录：$(pwd)" | tee -a "$LOGFILE"
+    echo -e "\n工作目录：$(pwd)" | tee -a "$LOGFILE"
 
     # 执行压缩
     echo "==== 开始处理 ====" | tee -a "$LOGFILE"
@@ -352,7 +383,7 @@ main() {
             find_cmd+=" \)"
         fi
         #        find_cmd+=" ! -name \"*-x265.*\" ! -name \"*-x264.*\" ! -name \"*-vp9.*\""
-
+        find_cmd+=" ! -path \"*/originals_bak/*\""
         # 读取文件并过滤非视频格式
         file_array=()
         while IFS= read -r file; do
@@ -384,6 +415,13 @@ main() {
             }
         fi
 
+        # 新增：移动文件确认提示
+        if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            echo
+            [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
+        fi
+
         # 处理文件
         for file in "${file_array[@]}"; do
             for enc in "${ENCODERS[@]}"; do
@@ -406,6 +444,13 @@ main() {
                 echo "操作已取消" | tee -a "$LOGFILE"
                 exit 0
             }
+        fi
+
+        # 新增：移动文件确认提示
+        if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            echo
+            [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
 
         # 处理文件
@@ -435,6 +480,13 @@ main() {
                 echo "操作已取消" | tee -a "$LOGFILE"
                 exit 0
             }
+        fi
+
+        # 新增：移动文件确认提示
+        if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
+            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            echo
+            [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
 
         # 处理文件
