@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：9.0.0 | 增加自动移动原文件到 originals_bak 文件夹
+# 版本：9.1.0 | 尝试增加判断，避免低速度影响整个压缩过程
 ##############################################
 
 SECONDS=0
@@ -106,6 +106,7 @@ validate_params() {
     declare -g DEPTH=1 # 默认递归深度为1
     declare -g SKIP_CONFIRM=0
     declare -g MOVE_FILES=0
+    declare -g MIN_SPEED='' # 新增：全局速度阈值
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -181,6 +182,14 @@ validate_params() {
             }
             ((threads < 1)) && {
                 echo "错误：线程数不能小于1"
+                return 1
+            }
+            ;;
+        -sp)
+            ((position++))
+            MIN_SPEED="$next_arg"
+            [[ ! "$MIN_SPEED" =~ ^[0-9]+(\.[0-9]+)?$ ]] && {
+                echo "错误：速度阈值必须为数字"
                 return 1
             }
             ;;
@@ -286,6 +295,79 @@ process_file() {
         ((THREADS > 1)) && cmd+=" -threads $THREADS"
         ;;
     esac
+
+    # 判断是否启用速度监控
+    if [[ -n "$MIN_SPEED" ]]; then
+        cmd+=" -progress ffmpeg_progress.txt" # 启用进度输出
+        cmd+=" -c:a copy \"$dest\""
+
+        # 启动编码进程
+        eval "$cmd" >/dev/null 2>&1 &
+        local ffmpeg_pid=$!
+
+        # 等待进度文件生成
+        while [ ! -f ffmpeg_progress.txt ]; do
+            sleep 0.1
+        done
+
+        # 监控编码速度
+        local speed_above_count=0
+        local speed_below_count=0
+        local consecutive_threshold=3 # 连续高于/低于阈值的次数
+
+        while true; do
+            if ! kill -0 $ffmpeg_pid 2>/dev/null; then
+                break
+            fi
+
+            # 获取最新的速度
+            speed=$(grep ^speed= ffmpeg_progress.txt | awk -F '[=x]' '{print $2}' | tail -1)
+
+            if [[ "$speed" =~ ^[0-9.]+$ ]]; then
+                # 根据速度与阈值关系更新计数器
+                if awk "BEGIN {exit !($MIN_SPEED < $speed)}"; then
+                    ((speed_above_count++))
+                    speed_below_count=0
+                else
+                    ((speed_below_count++))
+                    speed_above_count=0
+                fi
+
+                if ((speed_above_count >= consecutive_threshold)); then
+                    echo "编码速度连续$CONSECUTIVE_THRESHOLD次高于最小值，退出监控"
+                    break
+                fi
+
+                if ((speed_below_count >= consecutive_threshold)); then
+                    echo "编码速度连续$CONSECUTIVE_THRESHOLD次低于最小值，跳过此文件" | tee -a "$LOGFILE"
+                    kill -KILL $ffmpeg_pid 2>/dev/null
+                    wait $ffmpeg_pid
+                    mv "$src" "$(basename "$src")_skipped.$(extension "$src")"
+                    rm -f ffmpeg_progress.txt
+                    return 1
+                fi
+            fi
+
+            sleep 1
+        done
+
+        wait $ffmpeg_pid
+        if [ $? -eq 0 ]; then
+            local comp_size=$(stat -c%s "$dest")
+            ((PROCESSED++))
+            TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
+            TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
+            FILE_STATS+=("$(basename "$src"): $(format_bytes $orig_size) → $(format_bytes $comp_size)")
+            if [[ $MOVE_FILES -eq 1 ]]; then
+                mv -n "$src" originals_bak/
+            fi
+        else
+            echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
+            rm -f "$dest"
+        fi
+    fi
+    rm -f ffmpeg_progress.txt
+    else
     cmd+=" -c:a copy \"$dest\""
 
     if eval $cmd 2>&1; then
