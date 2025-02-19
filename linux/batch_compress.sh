@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：9.1.0 | 尝试增加判断，避免低速度影响整个压缩过程
+# 版本：9.0.0 | 增加自动移动原文件到 originals_bak 文件夹
 ##############################################
 
 SECONDS=0
@@ -16,6 +16,11 @@ declare -A SUPPORTED=(
     ["X265_CRF"]="0-51"
     ["VP9_CRF"]="0-63"
 )
+# 新增全局变量（修改点1）
+declare -g FFMPEG_PID=0
+declare -g FFMPEG_PGID=0
+declare -g SPEED_THRESHOLD=0
+
 # 获取CPU信息
 MAX_THREADS=$(nproc)
 declare -i MAX_THREADS
@@ -31,6 +36,29 @@ start_timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
 # 日志文件路径
 LOGFILE="compress.log"
+
+# 增强中断处理（修改点2）
+trap 'handle_interrupt' SIGINT
+
+handle_interrupt() {
+    echo -e "\n[强制终止] 正在清理所有相关进程..."
+
+    # 三级清理策略
+    {
+        ((FFMPEG_PGID > 0)) && kill -- -$FFMPEG_PGID 2>/dev/null
+        ((FFMPEG_PID > 0)) && pkill -P $FFMPEG_PID 2>/dev/null
+        pkill -f "ffmpeg7.*${src##*/}" 2>/dev/null
+    } &
+
+    # 文件重命名
+    if [[ -f "$src" ]]; then
+        skipped_file="${src%.*}-skipped.${src##*.}"
+        mv -f "$src" "$skipped_file"
+        echo "原文件已标记为：$skipped_file" | tee -a "$LOGFILE"
+    fi
+
+    exit 1
+}
 
 # 工具函数
 format_bytes() {
@@ -58,6 +86,8 @@ show_help() {
 
     echo -e "${GREEN}用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [线程数] [文件...]${RESET}"
     echo -e "${CYAN}说明:${RESET}"
+    echo -e "  ${YELLOW}-sp <数值>      ${RESET}设置最低允许转码速度(单位：倍速)，连续3次低于该值则跳过"
+    echo -e "${CYAN}其他选项保持不变...${RESET}"
     echo -e "  ${YELLOW}1. 参数顺序可变${RESET}：选项、编码器、速度等参数可以任意顺序排列"
     echo -e "  ${YELLOW}2. 特殊字符匹配${RESET}：指定文件时可使用通配符（如 \"1?.mp4\"），但需要加引号"
     echo -e "${CYAN}选项:${RESET}"
@@ -106,7 +136,6 @@ validate_params() {
     declare -g DEPTH=1 # 默认递归深度为1
     declare -g SKIP_CONFIRM=0
     declare -g MOVE_FILES=0
-    declare -g MIN_SPEED='' # 新增：全局速度阈值
 
     while ((position < ${#args[@]})); do
         local arg="${args[position]}"
@@ -185,11 +214,15 @@ validate_params() {
                 return 1
             }
             ;;
-        -sp)
+        -sp) # 新增参数处理
             ((position++))
-            MIN_SPEED="$next_arg"
-            [[ ! "$MIN_SPEED" =~ ^[0-9]+(\.[0-9]+)?$ ]] && {
-                echo "错误：速度阈值必须为数字"
+            [[ $position -ge ${#args[@]} ]] && {
+                echo "错误：-sp 需要参数值"
+                return 1
+            }
+            SPEED_THRESHOLD="${args[position]}"
+            [[ ! "$SPEED_THRESHOLD" =~ ^[0-9.]+$ ]] && {
+                echo "错误：无效的速度阈值格式 '$SPEED_THRESHOLD'"
                 return 1
             }
             ;;
@@ -277,9 +310,7 @@ process_file() {
     local orig_size=$(stat -c%s "$src")
     ((TOTAL_FILES++))
 
-    # echo "处理：$src ($(format_bytes $orig_size))" | tee -a "$LOGFILE"
-    # echo "开始时间：$start_time" | tee -a "$LOGFILE"
-
+    # 构建ffmpeg命令
     local cmd="ffmpeg7 -hide_banner -i \"$src\""
     case "$enc" in
     x265)
@@ -295,82 +326,57 @@ process_file() {
         ((THREADS > 1)) && cmd+=" -threads $THREADS"
         ;;
     esac
+    cmd+=" -c:a copy -progress pipe:1 -y \"$dest\" 2>&1"
 
-    # 判断是否启用速度监控
-    if [[ -n "$MIN_SPEED" ]]; then
-        cmd+=" -progress ffmpeg_progress.txt" # 启用进度输出
-        cmd+=" -c:a copy \"$dest\""
+    # 速度检测逻辑（新增部分开始）
+    declare -i counter=0
+    declare -i last_check_time=0
+    local speed_check_pid
 
-        # 启动编码进程
-        eval "$cmd" >/dev/null 2>&1 &
-        local ffmpeg_pid=$!
+    # 启动ffmpeg并监控
+    eval "$cmd" > >(
+        while IFS= read -r line; do
+            echo "ffmpeg输出: $line"
+            if [[ "$line" =~ speed=([0-9.]+)x ]]; then
+                speed="${BASH_REMATCH}"
+                 echo "当前速度: $speed"
+                current_time=$(date +%s)
 
-        # 等待进度文件生成
-        while [ ! -f ffmpeg_progress.txt ]; do
-            sleep 0.1
+                # 速度检测逻辑
+                (($(awk -v a="$SPEED_THRESHOLD" 'BEGIN {print (a>0)}'))) && {
+                    if ((current_time - last_check_time >= 2)); then
+                        if awk -v spd="$speed" -v lim="$SPEED_THRESHOLD" 'BEGIN { exit (spd < lim) ? 0 : 1 }'; then
+                            ((counter++))
+                            if ((counter >= 3)); then
+                                echo "[警告] 连续三次低速(${speed}x)，终止进程" | tee -a "$LOGFILE"
+                                pkill -P $$
+                                # 重命名原文件
+                                skipped_file="${src%.*}-skipped.${src##*.}"
+                                mv -f "$src" "$skipped_file"
+                                echo "原文件已重命名为：$skipped_file" | tee -a "$LOGFILE"
+                                exit 1
+                            fi
+                        else
+                            counter=0
+                        fi
+                        last_check_time=$current_time
+                    fi
+                }
+            fi
         done
+    ) &
 
-        # 监控编码速度
-        local speed_above_count=0
-        local speed_below_count=0
-        local consecutive_threshold=3 # 连续高于/低于阈值的次数
+    FFMPEG_PID=$!
+    FFMPEG_PGID=$(ps -o pgid= $FFMPEG_PID | tr -d ' ')
 
-        while true; do
-            if ! kill -0 $ffmpeg_pid 2>/dev/null; then
-                break
-            fi
+    wait $FFMPEG_PID
+    local exit_status=$?
 
-            # 获取最新的速度
-            speed=$(grep ^speed= ffmpeg_progress.txt | awk -F '[=x]' '{print $2}' | tail -1)
+    FFMPEG_PID=0
+    FFMPEG_PGID=0
+    # 新增部分结束
 
-            if [[ "$speed" =~ ^[0-9.]+$ ]]; then
-                # 根据速度与阈值关系更新计数器
-                if awk "BEGIN {exit !($MIN_SPEED < $speed)}"; then
-                    ((speed_above_count++))
-                    speed_below_count=0
-                else
-                    ((speed_below_count++))
-                    speed_above_count=0
-                fi
-
-                if ((speed_above_count >= consecutive_threshold)); then
-                    echo "编码速度连续$CONSECUTIVE_THRESHOLD次高于最小值，退出监控"
-                    break
-                fi
-
-                if ((speed_below_count >= consecutive_threshold)); then
-                    echo "编码速度连续$CONSECUTIVE_THRESHOLD次低于最小值，跳过此文件" | tee -a "$LOGFILE"
-                    kill -KILL $ffmpeg_pid 2>/dev/null
-                    wait $ffmpeg_pid
-                    mv "$src" "$(basename "$src")_skipped.$(extension "$src")"
-                    rm -f ffmpeg_progress.txt
-                    return 1
-                fi
-            fi
-
-            sleep 1
-        done
-
-        wait $ffmpeg_pid
-        if [ $? -eq 0 ]; then
-            local comp_size=$(stat -c%s "$dest")
-            ((PROCESSED++))
-            TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
-            TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
-            FILE_STATS+=("$(basename "$src"): $(format_bytes $orig_size) → $(format_bytes $comp_size)")
-            if [[ $MOVE_FILES -eq 1 ]]; then
-                mv -n "$src" originals_bak/
-            fi
-        else
-            echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
-            rm -f "$dest"
-        fi
-    fi
-    rm -f ffmpeg_progress.txt
-    else
-    cmd+=" -c:a copy \"$dest\""
-
-    if eval $cmd 2>&1; then
+    if [[ $exit_status -eq 0 ]]; then
         local comp_size=$(stat -c%s "$dest")
         ((PROCESSED++))
         TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
@@ -391,7 +397,7 @@ process_file() {
             # 移动原文件逻辑
             local file_dir=$(dirname "$src")
             local dest_dir="${file_dir}/originals_bak"
-            local dest_path="${dest_dir}/$(basename "$src")" # 完整目标路径
+            local dest_path="${dest_dir}/$(basename "$src")"
 
             # 创建目标目录
             mkdir -p "$dest_dir" || {
@@ -604,6 +610,6 @@ main() {
     echo -e "总耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n" | tee -a "$LOGFILE"
 }
 
-trap 'echo "中断操作！"; exit 1' SIGINT
+# trap 'echo "中断操作！"; exit 1' SIGINT
 # 脚本入口
 main "$@"
