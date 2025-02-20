@@ -40,23 +40,14 @@ LOGFILE="compress.log"
 # 增强中断处理（修改点2）
 trap 'handle_interrupt' SIGINT
 
+# 在 handle_interrupt 中移除危险操作
 handle_interrupt() {
-    echo -e "\n[强制终止] 正在清理所有相关进程..."
-
-    # 三级清理策略
-    {
-        ((FFMPEG_PGID > 0)) && kill -- -$FFMPEG_PGID 2>/dev/null
-        ((FFMPEG_PID > 0)) && pkill -P $FFMPEG_PID 2>/dev/null
-        pkill -f "ffmpeg7.*${src##*/}" 2>/dev/null
-    } &
-
-    # 文件重命名
-    if [[ -f "$src" ]]; then
-        skipped_file="${src%.*}-skipped.${src##*.}"
-        mv -f "$src" "$skipped_file"
-        echo "原文件已标记为：$skipped_file" | tee -a "$LOGFILE"
-    fi
-
+    echo -e "\n[强制终止] 安全终止中..."
+    [[ $FFMPEG_PID -gt 0 ]] && {
+        kill -SIGTERM $FFMPEG_PID 2>/dev/null
+        sleep 0.5
+        kill -SIGKILL $FFMPEG_PID 2>/dev/null
+    }
     exit 1
 }
 
@@ -71,6 +62,14 @@ format_bytes() {
         }
         printf("%.2f%s", bytes, substr(suffix,1,1))
     }'
+}
+
+kill_ffmpeg() {
+    [[ $FFMPEG_PID -gt 0 ]] && {
+        kill -KILL $FFMPEG_PID # 清理进程组
+        # kill -9 $FFMPEG_PID 2>/dev/null
+        sleep 1
+    }
 }
 
 # 显示帮助信息
@@ -331,30 +330,42 @@ process_file() {
     # 速度检测逻辑（新增部分开始）
     declare -i counter=0
     declare -i last_check_time=0
-    local speed_check_pid
+    local speed_check_pid speed_raw
 
     # 启动ffmpeg并监控
     eval "$cmd" > >(
+        FFMPEG_PID=$!
+        wait $FFMPEG_PID
         while IFS= read -r line; do
-            echo "ffmpeg输出: $line"
-            if [[ "$line" =~ speed=([0-9.]+)x ]]; then
-                speed="${BASH_REMATCH}"
-                 echo "当前速度: $speed"
+            echo "ffmpeg: $line"
+            if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
+                speed_raw="${BASH_REMATCH[1]}"
+                speed="${speed_raw/x/}"
                 current_time=$(date +%s)
+                echo "speed_raw is : $speed_raw"
+                echo "speed is: $speed"
+                if [[ "$speed" == "N/A" ]]; then
+                    speed=0
+                fi
 
                 # 速度检测逻辑
                 (($(awk -v a="$SPEED_THRESHOLD" 'BEGIN {print (a>0)}'))) && {
-                    if ((current_time - last_check_time >= 2)); then
-                        if awk -v spd="$speed" -v lim="$SPEED_THRESHOLD" 'BEGIN { exit (spd < lim) ? 0 : 1 }'; then
+                    echo "检测到转码速度：$speed"
+
+                    if ((current_time - last_check_time >= 1)); then
+                        if awk -v spd="${BASH_REMATCH[1]}" -v lim="$SPEED_THRESHOLD" 'BEGIN { exit (spd < lim) ? 0 : 1 }'; then
                             ((counter++))
                             if ((counter >= 3)); then
                                 echo "[警告] 连续三次低速(${speed}x)，终止进程" | tee -a "$LOGFILE"
-                                pkill -P $$
+                                # 精准终止ffmpeg进程
+                                kill_ffmpeg
                                 # 重命名原文件
                                 skipped_file="${src%.*}-skipped.${src##*.}"
                                 mv -f "$src" "$skipped_file"
                                 echo "原文件已重命名为：$skipped_file" | tee -a "$LOGFILE"
-                                exit 1
+                                echo "即将删除临时转换文件$dest"
+                                rm -f "$dest"
+                                return 1
                             fi
                         else
                             counter=0
@@ -366,14 +377,7 @@ process_file() {
         done
     ) &
 
-    FFMPEG_PID=$!
-    FFMPEG_PGID=$(ps -o pgid= $FFMPEG_PID | tr -d ' ')
-
-    wait $FFMPEG_PID
-    local exit_status=$?
-
-    FFMPEG_PID=0
-    FFMPEG_PGID=0
+    # FFMPEG_PID=$!
     # 新增部分结束
 
     if [[ $exit_status -eq 0 ]]; then
