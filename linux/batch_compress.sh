@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：9.0.0 | 增加自动移动原文件到 originals_bak 文件夹
+# 版本：10.0.0 | 增加自动移动原文件到 originals_bak 文件夹
 ##############################################
 
 SECONDS=0
@@ -64,14 +64,7 @@ format_bytes() {
     }'
 }
 
-kill_ffmpeg() {
-    [[ $FFMPEG_PID -gt 0 ]] && {
-        kill -KILL $FFMPEG_PID # 清理进程组
-        # kill -9 $FFMPEG_PID 2>/dev/null
-        sleep 1
-    }
-}
-
+# 修改点1：增强进程终止函数
 # 显示帮助信息
 show_help() {
     # 颜色定义
@@ -297,20 +290,31 @@ process_file() {
     local src="$1" enc="$2"
     local base="${src%.*}" ext="${src##*.}"
     local dest="${base}-${enc}.${ext}"
+    local exit_status=127
+    local FFMPEG_PID=0 FFMPEG_PGID=0
+last_check_time=0
+counter=0
+output_counter=0
 
-    # 跳过已处理文件
-    if [[ -f "$dest" ]] || [[ "$src" =~ -(x264|x265|vp9)\. ]]; then
+    # 增强型文件跳过检查
+    if { [[ -f "$dest" ]] && [[ $(stat -c%s "$dest") -gt 1024 ]]; } ||
+        [[ "$src" =~ -(x264|x265|vp9|skipped)\. ]]; then
         echo "跳过已处理文件：$src" | tee -a "$LOGFILE"
-        return
+        return 0
     fi
 
+    # 初始化统计信息
     local start=$(date +%s)
     local start_time=$(date +"%Y-%m-%d %H:%M:%S")
     local orig_size=$(stat -c%s "$src")
     ((TOTAL_FILES++))
+# 在 process_file 函数开头添加：
+#src="$(realpath "$src")"
+#dest="$(realpath "$dest")"
+echo “src is $src”
 
-    # 构建ffmpeg命令
-    local cmd="ffmpeg7 -hide_banner -i \"$src\""
+    # 构建ffmpeg命令（群晖兼容版）
+    local cmd="ffmpeg7 -hide_banner -nostdin -y -i \"$src\""
     case "$enc" in
     x265)
         cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
@@ -325,108 +329,112 @@ process_file() {
         ((THREADS > 1)) && cmd+=" -threads $THREADS"
         ;;
     esac
-    cmd+=" -c:a copy -progress pipe:1 -y \"$dest\" 2>&1"
+    cmd+=" -c:a copy -progress pipe:1 \"$dest\"  2>&1"
+    echo "执行命令：$cmd" | tee -a "$LOGFILE"
 
-    # 速度检测逻辑（新增部分开始）
-    declare -i counter=0
-    declare -i last_check_time=0
-    local speed_check_pid speed_raw
+    last_check_time=0
+    counter=0
 
-    # 启动ffmpeg并监控
-    eval "$cmd" > >(
-        FFMPEG_PID=$!
-        wait $FFMPEG_PID
-        while IFS= read -r line; do
-            echo "ffmpeg: $line"
-            if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
-                speed_raw="${BASH_REMATCH[1]}"
-                speed="${speed_raw/x/}"
-                current_time=$(date +%s)
-                echo "speed_raw is : $speed_raw"
-                echo "speed is: $speed"
-                if [[ "$speed" == "N/A" ]]; then
-                    speed=0
-                fi
+    # 启动 ffmpeg7 并通过进程替换捕获输出（无临时文件）
+    echo "启动进程..." | tee -a "$LOGFILE"
+    #exec 3< <(pwd;ls;ffmpeg7 -i $src -c:v libx265 -c:a copy $dest)
+exec 3< <(eval "$cmd")
+    echo "进程已启动" | tee -a "$LOGFILE"
 
-                # 速度检测逻辑
-                (($(awk -v a="$SPEED_THRESHOLD" 'BEGIN {print (a>0)}'))) && {
-                    echo "检测到转码速度：$speed"
-
-                    if ((current_time - last_check_time >= 1)); then
-                        if awk -v spd="${BASH_REMATCH[1]}" -v lim="$SPEED_THRESHOLD" 'BEGIN { exit (spd < lim) ? 0 : 1 }'; then
-                            ((counter++))
-                            if ((counter >= 3)); then
-                                echo "[警告] 连续三次低速(${speed}x)，终止进程" | tee -a "$LOGFILE"
-                                # 精准终止ffmpeg进程
-                                kill_ffmpeg
-                                # 重命名原文件
-                                skipped_file="${src%.*}-skipped.${src##*.}"
-                                mv -f "$src" "$skipped_file"
-                                echo "原文件已重命名为：$skipped_file" | tee -a "$LOGFILE"
-                                echo "即将删除临时转换文件$dest"
-                                rm -f "$dest"
-                                return 1
-                            fi
-                        else
-                            counter=0
-                        fi
-                        last_check_time=$current_time
+    FFMPEG_PID=$!
+	echo "进程 PID: $CHILD_PID"
+	CHILD_PID=$(ps --ppid $FFMPEG_PID | grep -v PID | awk '{print $1}')
+	echo "子进程 PID: $CHILD_PID"
+    FFMPEG_PID=$CHILD_PID
+    echo "进程PID: $FFMPEG_PID" | tee -a "$LOGFILE"
+    # 启动进度监控
+    # 从文件描述符 3 读取输出并监控速度
+    while IFS= read -r line; do
+        echo "test: $line"
+        if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
+            speed_raw="${BASH_REMATCH[1]}"
+            speed="${speed_raw/x/}"
+            if [[ "$speed" == "N/A" ]]; then
+                speed=0
+            fi
+            echo "当前速度: $speed"
+            current_time=$(date +%s)
+echo "======+++++++$current_time=====$SPEED_THRESHOLD===++++"
+            if ((current_time - last_check_time >= 1)); then
+                #if awk -v spd="$speed" 'BEGIN { exit (spd <$SPEED_THRESHOLD ) ? 0 : 1 }'; then
+if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < threshold) ? 0 : 1 }'; then
+                    ((counter++))
+                    echo "低速计数：$counter/3"
+                    if ((counter >= 3)); then
+                        echo "[警告] 连续三次低速，终止进程"
+                        kill -9 "$FFMPEG_PID" 2>/dev/null # 强制终止
+                        break
                     fi
-                }
-            fi
-        done
-    ) &
-
-    # FFMPEG_PID=$!
-    # 新增部分结束
-
-    if [[ $exit_status -eq 0 ]]; then
-        local comp_size=$(stat -c%s "$dest")
-        ((PROCESSED++))
-        TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
-        TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
-
-        local end_time=$(date +"%Y-%m-%d %H:%M:%S")
-        local duration=$(($(date +%s) - start))
-
-        local log="文件：$src\n"
-        log+="开始时间：$start_time\n"
-        log+="结束时间：$end_time\n"
-        log+="耗时：$(($duration / 3600))小时$((($duration / 60) % 60))分钟$(($duration % 60))秒\n"
-        log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
-        log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
-        FILE_STATS+=("$log")
-
-        if [[ $MOVE_FILES -eq 1 ]]; then
-            # 移动原文件逻辑
-            local file_dir=$(dirname "$src")
-            local dest_dir="${file_dir}/originals_bak"
-            local dest_path="${dest_dir}/$(basename "$src")"
-
-            # 创建目标目录
-            mkdir -p "$dest_dir" || {
-                echo "[错误] 无法创建目录：$dest_dir" | tee -a "$LOGFILE"
-                return 1
-            }
-
-            # 检测目标文件是否已存在
-            if [[ -f "$dest_path" ]]; then
-                echo "[警告] 跳过移动：$dest_path 已存在" | tee -a "$LOGFILE"
-                return 1
-            fi
-
-            # 执行移动
-            if mv -n "$src" "$dest_dir/"; then
-                echo "原文件已移动至：$dest_path" | tee -a "$LOGFILE"
-            else
-                echo "[错误] 文件移动失败：$src → $dest_dir/" | tee -a "$LOGFILE"
-                return 1
+                else
+                    counter=0
+                fi
+                last_check_time=$current_time
             fi
         fi
-    else
-        echo "[错误] 处理失败：$src" | tee -a "$LOGFILE"
-        rm -f "$dest"
+    done <&3
+
+    # 清理文件描述符
+    exec 3<&-
+
+    # 等待进程结束
+    local timeout=$((FFMPEG_TIMEOUT * 2))
+    while ((timeout-- > 0)); do
+        if ! kill -0 $FFMPEG_PID 2>/dev/null; then
+            [[ -f "$exitfile" ]] && exit_status=$(cat "$exitfile")
+            break
+        fi
+        sleep 0.5
+    done
+
+    # 后续处理
+    if [[ $exit_status -eq 0 ]]; then
+        local comp_size=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+        if ((comp_size > 0 && comp_size < orig_size)); then
+            ((PROCESSED++))
+            TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
+            TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
+            # 记录日志
+            local duration=$(($(date +%s) - start))
+            local log="文件：$src\n开始时间：$start_time\n耗时：$(printf "%02dh%02dm%02ds" $((duration / 3600)) $((duration % 3600 / 60)) $((duration % 60)))\n"
+            log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
+            log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
+            FILE_STATS+=("$log")
+        else
+            echo "[错误] 输出文件异常" | tee -a "$LOGFILE"
+            exit_status=1
+        fi
     fi
+
+    # 文件移动处理
+    if [[ $exit_status -eq 0 && $MOVE_FILES -eq 1 ]]; then
+        local dest_dir="$(dirname "$src")/originals_bak"
+        mkdir -p "$dest_dir" || return 1
+        if mv -n "$src" "$dest_dir/"; then
+            echo "原文件已移动至：$dest_dir/$(basename "$src")" | tee -a "$LOGFILE"
+        else
+            echo "[错误] 文件移动失败" | tee -a "$LOGFILE"
+        fi
+    fi
+
+    return $exit_status
+}
+
+# 增强型终止函数
+kill_ffmpeg() {
+    [[ $FFMPEG_PID -gt 0 ]] && {
+        echo "[安全清理] 终止进程树 PID:$FFMPEG_PID"
+        pkill -P $FFMPEG_PID
+        kill -SIGTERM $FFMPEG_PID
+        sleep 1
+        kill -SIGKILL $FFMPEG_PID 2>/dev/null
+        # 清理临时文件
+        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+    }
 }
 
 # 主函数
