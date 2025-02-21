@@ -78,7 +78,6 @@ show_help() {
 
     echo -e "${GREEN}用法: $0 [选项] [编码器...] [编码速度] [文件格式...] [线程数] [文件...]${RESET}"
     echo -e "${CYAN}说明:${RESET}"
-    echo -e "  ${YELLOW}-sp <数值>      ${RESET}设置最低允许转码速度(单位：倍速)，连续3次低于该值则跳过"
     echo -e "${CYAN}其他选项保持不变...${RESET}"
     echo -e "  ${YELLOW}1. 参数顺序可变${RESET}：选项、编码器、速度等参数可以任意顺序排列"
     echo -e "  ${YELLOW}2. 特殊字符匹配${RESET}：指定文件时可使用通配符（如 \"1?.mp4\"），但需要加引号"
@@ -90,6 +89,7 @@ show_help() {
     echo -e "  ${YELLOW}-y              ${RESET}自动确认源文件，不提示输入，若需无人值守运行，请使用-y选项及-m选项"
     echo -e "  ${YELLOW}-d <目录>       ${RESET}指定工作目录（默认当前目录）"
     echo -e "  ${YELLOW}-r <深度>  <通配符文件>    ${RESET}递归深度（0=无限，1=当前目录，2=一级子目录，默认1）,递归处理匹配通配符文件（例如：\"*.mp4 *.mkv\"）"
+    echo -e "  ${YELLOW}-sp <数值>      ${RESET}设置最低允许转码速度(单位：倍速)，连续3次低于该值则跳过并重命名文件，增加后缀 _skipped"
     echo -e "${CYAN}编码器:${RESET}"
     echo -e "  ${MAGENTA}${SUPPORTED[ENCODERS]}${RESET}"
     echo -e "${CYAN}文件格式:${RESET}"
@@ -292,9 +292,8 @@ process_file() {
     local dest="${base}-${enc}.${ext}"
     local exit_status=127
     local FFMPEG_PID=0 FFMPEG_PGID=0
-last_check_time=0
-counter=0
-output_counter=0
+    last_check_time=0
+    counter=0
 
     # 增强型文件跳过检查
     if { [[ -f "$dest" ]] && [[ $(stat -c%s "$dest") -gt 1024 ]]; } ||
@@ -308,10 +307,6 @@ output_counter=0
     local start_time=$(date +"%Y-%m-%d %H:%M:%S")
     local orig_size=$(stat -c%s "$src")
     ((TOTAL_FILES++))
-# 在 process_file 函数开头添加：
-#src="$(realpath "$src")"
-#dest="$(realpath "$dest")"
-echo “src is $src”
 
     # 构建ffmpeg命令（群晖兼容版）
     local cmd="ffmpeg7 -hide_banner -nostdin -y -i \"$src\""
@@ -330,27 +325,24 @@ echo “src is $src”
         ;;
     esac
     cmd+=" -c:a copy -progress pipe:1 \"$dest\"  2>&1"
-    echo "执行命令：$cmd" | tee -a "$LOGFILE"
-
-    last_check_time=0
-    counter=0
+    # echo "执行命令：$cmd" | tee -a "$LOGFILE"
 
     # 启动 ffmpeg7 并通过进程替换捕获输出（无临时文件）
-    echo "启动进程..." | tee -a "$LOGFILE"
+    echo "启动进程..."
     #exec 3< <(pwd;ls;ffmpeg7 -i $src -c:v libx265 -c:a copy $dest)
-exec 3< <(eval "$cmd")
-    echo "进程已启动" | tee -a "$LOGFILE"
+    exec 3< <(eval "$cmd") # 必须用eval执行，否则会导致子进程无法获取环境变量
+    echo "进程已启动"
 
     FFMPEG_PID=$!
-	echo "进程 PID: $CHILD_PID"
-	CHILD_PID=$(ps --ppid $FFMPEG_PID | grep -v PID | awk '{print $1}')
-	echo "子进程 PID: $CHILD_PID"
+    echo "进程 PID: $FFMPEG_PID"
+    CHILD_PID=$(ps --ppid $FFMPEG_PID | grep -v PID | awk '{print $1}')
+    echo "子进程 PID: $CHILD_PID"
     FFMPEG_PID=$CHILD_PID
-    echo "进程PID: $FFMPEG_PID" | tee -a "$LOGFILE"
+    echo "进程PID: $FFMPEG_PID"
     # 启动进度监控
     # 从文件描述符 3 读取输出并监控速度
     while IFS= read -r line; do
-        echo "test: $line"
+        echo "FFMPEG输出: $line"
         if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
             speed_raw="${BASH_REMATCH[1]}"
             speed="${speed_raw/x/}"
@@ -359,15 +351,32 @@ exec 3< <(eval "$cmd")
             fi
             echo "当前速度: $speed"
             current_time=$(date +%s)
-echo "======+++++++$current_time=====$SPEED_THRESHOLD===++++"
-            if ((current_time - last_check_time >= 1)); then
+            if ((current_time - last_check_time >= 1)); then # 每秒检查一次
                 #if awk -v spd="$speed" 'BEGIN { exit (spd <$SPEED_THRESHOLD ) ? 0 : 1 }'; then
-if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < threshold) ? 0 : 1 }'; then
+                if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < threshold) ? 0 : 1 }'; then
                     ((counter++))
                     echo "低速计数：$counter/3"
                     if ((counter >= 3)); then
                         echo "[警告] 连续三次低速，终止进程"
-                        kill -9 "$FFMPEG_PID" 2>/dev/null # 强制终止
+                        kill -SIGTERM "$FFMPEG_PID"
+                        sleep 2 # 等待进程结束
+                        if ps -p "$FFMPEG_PID" >/dev/null; then
+                            echo "[错误] 进程未正常结束，强制终止" | tee -a "$LOGFILE"
+                            kill -SIGKILL "$FFMPEG_PID" 2>/dev/null
+                        else
+                            echo "进程已正常退出。"
+                        fi
+                        # 把源文件重命名为 skipped 文件并删除目标文件
+
+                        rm -f "$dest"
+                        echo "非完整的目标文件已删除：$dest"
+                        local skipped_file="${src%.*}-skipped.${ext}"
+                        mv -n "$src" "$skipped_file"
+                        echo "源文件$src已重命名为：$skipped_file"
+                        # local log="文件：$src\n开始时间：$start_time\n"
+                        local log="源文件$src已重命名为：$skipped_file"
+                        FILE_STATS+=("$log")
+                        # 跳出循环
                         break
                     fi
                 else
@@ -381,15 +390,9 @@ if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < thre
     # 清理文件描述符
     exec 3<&-
 
-    # 等待进程结束
-    local timeout=$((FFMPEG_TIMEOUT * 2))
-    while ((timeout-- > 0)); do
-        if ! kill -0 $FFMPEG_PID 2>/dev/null; then
-            [[ -f "$exitfile" ]] && exit_status=$(cat "$exitfile")
-            break
-        fi
-        sleep 0.5
-    done
+    # # 等待进程结束
+    # wait $FFMPEG_PID
+    exit_status=$? # 获取退出状态
 
     # 后续处理
     if [[ $exit_status -eq 0 ]]; then
@@ -425,17 +428,17 @@ if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < thre
 }
 
 # 增强型终止函数
-kill_ffmpeg() {
-    [[ $FFMPEG_PID -gt 0 ]] && {
-        echo "[安全清理] 终止进程树 PID:$FFMPEG_PID"
-        pkill -P $FFMPEG_PID
-        kill -SIGTERM $FFMPEG_PID
-        sleep 1
-        kill -SIGKILL $FFMPEG_PID 2>/dev/null
-        # 清理临时文件
-        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
-    }
-}
+# kill_ffmpeg() {
+#     [[ $FFMPEG_PID -gt 0 ]] && {
+#         echo "[安全清理] 终止进程树 PID:$FFMPEG_PID"
+#         pkill -P $FFMPEG_PID
+#         kill -SIGTERM $FFMPEG_PID
+#         sleep 1
+#         kill -SIGKILL $FFMPEG_PID 2>/dev/null
+#         # 清理临时文件
+#         [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+#     }
+# }
 
 # 主函数
 main() {
