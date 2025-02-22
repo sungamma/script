@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：10.0.0 | 增加自动移动原文件到 originals_bak 文件夹
+# 版本：10.1.0 | 增加自动移动源文件到 originals_bak 文件夹
 ##############################################
 
 SECONDS=0
@@ -84,7 +84,7 @@ show_help() {
     echo -e "${CYAN}选项:${RESET}"
     echo -e "  ${YELLOW}-h, --help      ${RESET}显示此帮助信息"
     echo -e "  ${YELLOW}-crf <数值>     ${RESET}设置压缩质量（默认：x264=25, x265=28, vp9=30）"
-    echo -e "  ${YELLOW}-m              ${RESET}自动移动原文件到 originals_bak 文件夹"
+    echo -e "  ${YELLOW}-m              ${RESET}自动移动源文件到 originals_bak 文件夹"
     echo -e "  ${YELLOW}-s <数值>       ${RESET}设置线程数(默认使用全部 ${GREEN}$MAX_THREADS${RESET} 线程)"
     echo -e "  ${YELLOW}-y              ${RESET}自动确认源文件，不提示输入，若需无人值守运行，请使用-y选项及-m选项"
     echo -e "  ${YELLOW}-d <目录>       ${RESET}指定工作目录（默认当前目录）"
@@ -285,7 +285,6 @@ validate_params() {
     return 0
 }
 
-# 文件处理
 process_file() {
     local src="$1" enc="$2"
     local base="${src%.*}" ext="${src##*.}"
@@ -294,151 +293,140 @@ process_file() {
     local FFMPEG_PID=0 FFMPEG_PGID=0
     last_check_time=0
     counter=0
+    # 新增状态变量（converting-转换中/skipped_existing-已存在跳过/skipped_speed-低速跳过/converted-转换成功/failed-转换失败）
+    local status="converting"
+    local skipped_file=""
 
     # 增强型文件跳过检查
     if { [[ -f "$dest" ]] && [[ $(stat -c%s "$dest") -gt 1024 ]]; } ||
         [[ "$src" =~ -(x264|x265|vp9|skipped)\. ]]; then
         echo "跳过已处理文件：$src" | tee -a "$LOGFILE"
-        return 0
-    fi
+        status="skipped_existing"
+    else
+        # 初始化统计信息
+        local start=$(date +%s)
+        local start_time=$(date +"%Y-%m-%d %H:%M:%S")
+        local orig_size=$(stat -c%s "$src")
+        ((TOTAL_FILES++))
 
-    # 初始化统计信息
-    local start=$(date +%s)
-    local start_time=$(date +"%Y-%m-%d %H:%M:%S")
-    local orig_size=$(stat -c%s "$src")
-    ((TOTAL_FILES++))
+        # 构建ffmpeg命令（群晖兼容版）
+        local cmd="ffmpeg7 -hide_banner -nostdin -y -i \"$src\""
+        case "$enc" in
+        x265)
+            cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
+            cmd+=" -tag:v hvc1 -threads $THREADS"
+            ;;
+        x264)
+            cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
+            cmd+=" -profile:v high -level 4.1 -threads $THREADS"
+            ;;
+        vp9)
+            cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1"
+            ((THREADS > 1)) && cmd+=" -threads $THREADS"
+            ;;
+        esac
+        cmd+=" -c:a copy -progress pipe:1 \"$dest\"  2>&1"
 
-    # 构建ffmpeg命令（群晖兼容版）
-    local cmd="ffmpeg7 -hide_banner -nostdin -y -i \"$src\""
-    case "$enc" in
-    x265)
-        cmd+=" -c:v libx265 -crf $CRF -preset $PRESET"
-        cmd+=" -tag:v hvc1 -threads $THREADS"
+        # 启动 ffmpeg7 并通过进程替换捕获输出
+        echo "启动进程..."
+        exec 3< <(eval "$cmd")
+        echo "进程已启动"
+        FFMPEG_PID=$!
+        echo "进程 PID: $FFMPEG_PID"
+        wait 1
+        CHILD_PID=$(ps --ppid $FFMPEG_PID | grep -v PID | awk '{print $1}')
+        echo "子进程 PID: $CHILD_PID"
+        FFMPEG_PID=$CHILD_PID
+
+        # 进度监控
+        while IFS= read -r line; do
+            echo "FFMPEG输出: $line"
+            if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
+                speed_raw="${BASH_REMATCH[1]}"
+                speed="${speed_raw/x/}"
+                if [[ "$speed" == "N/A" ]]; then
+                    speed=0
+                fi
+                echo "当前速度: $speed"
+
+                current_time=$(date +%s)
+                if ((current_time - last_check_time >= 1)); then
+                    if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < threshold) ? 0 : 1 }'; then
+                        ((counter++))
+                        echo "低速计数：$counter/3"
+                        if ((counter >= 3)); then
+                            echo "[警告] 连续三次低速，终止进程"
+                            status="skipped_speed"
+                            skipped_file="${src%.*}-skipped.${ext}"
+                            kill -SIGKILL "$FFMPEG_PID" 2>/dev/null
+                            sleep 1
+                            rm -f "$dest"
+                            mv -n "$src" "$skipped_file"
+                            break
+                        fi
+                    else
+                        counter=0
+                    fi
+                    last_check_time=$current_time
+                fi
+            fi
+        done <&3
+
+        exec 3<&-
+
+        # 获取最终退出状态
+        exit_status=$?
+
+        # 根据退出状态更新状态变量
+        if [[ $status != "skipped_speed" ]]; then
+            if [[ $exit_status -eq 0 ]]; then
+                local comp_size=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+                if ((comp_size > 0 && comp_size < orig_size)); then
+                    status="converted"
+                else
+                    status="failed"
+                fi
+            else
+                status="failed"
+            fi
+        fi
+    fi # 结束主处理逻辑
+
+    # 统一日志记录
+    local log=""
+    case "$status" in
+    "skipped_existing")
+        log="文件：$src\n状态：已跳过（目标文件已存在）\n"
         ;;
-    x264)
-        cmd+=" -c:v libx264 -crf $CRF -preset $PRESET"
-        cmd+=" -profile:v high -level 4.1 -threads $THREADS"
+    "skipped_speed")
+        log="文件：$src\n开始时间：$start_time\n"
+        log+="状态：因速度过低中止\n源文件已重命名为：$skipped_file \n"
         ;;
-    vp9)
-        cmd+=" -c:v libvpx-vp9 -crf $CRF -b:v 0 -row-mt 1"
-        ((THREADS > 1)) && cmd+=" -threads $THREADS"
+    "converted")
+        local duration=$(($(date +%s) - start))
+        log="文件：$src\n开始时间：$start_time\n耗时：$(printf "%02dh%02dm%02ds" $((duration / 3600)) $((duration % 3600 / 60)) $((duration % 60)))"
+        log+="\n原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)"
+        log+="\n压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
+        ((PROCESSED++))
+        TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
+        TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
+        ;;
+    "failed")
+        log="文件：$src\n状态：转换失败\n"
         ;;
     esac
-    cmd+=" -c:a copy -progress pipe:1 \"$dest\"  2>&1"
-    # echo "执行命令：$cmd" | tee -a "$LOGFILE"
+    [[ -n "$log" ]] && FILE_STATS+=("$log")
 
-    # 启动 ffmpeg7 并通过进程替换捕获输出（无临时文件）
-    echo "启动进程..."
-    #exec 3< <(pwd;ls;ffmpeg7 -i $src -c:v libx265 -c:a copy $dest)
-    exec 3< <(eval "$cmd") # 必须用eval执行，否则会导致子进程无法获取环境变量
-    echo "进程已启动"
-
-    FFMPEG_PID=$!
-    echo "进程 PID: $FFMPEG_PID"
-    CHILD_PID=$(ps --ppid $FFMPEG_PID | grep -v PID | awk '{print $1}')
-    echo "子进程 PID: $CHILD_PID"
-    FFMPEG_PID=$CHILD_PID
-    echo "进程PID: $FFMPEG_PID"
-    # 启动进度监控
-    # 从文件描述符 3 读取输出并监控速度
-    while IFS= read -r line; do
-        echo "FFMPEG输出: $line"
-        if [[ "$line" =~ speed=(([0-9.]+)x?|N/A) ]]; then
-            speed_raw="${BASH_REMATCH[1]}"
-            speed="${speed_raw/x/}"
-            if [[ "$speed" == "N/A" ]]; then
-                speed=0
-            fi
-            echo "当前速度: $speed"
-            current_time=$(date +%s)
-            if ((current_time - last_check_time >= 1)); then # 每秒检查一次
-                #if awk -v spd="$speed" 'BEGIN { exit (spd <$SPEED_THRESHOLD ) ? 0 : 1 }'; then
-                if awk -v spd="$speed" -v threshold="$SPEED_THRESHOLD" 'BEGIN { exit (spd < threshold) ? 0 : 1 }'; then
-                    ((counter++))
-                    echo "低速计数：$counter/3"
-                    if ((counter >= 3)); then
-                        echo "[警告] 连续三次低速，终止进程"
-                        kill -SIGTERM "$FFMPEG_PID"
-                        sleep 2 # 等待进程结束
-                        if ps -p "$FFMPEG_PID" >/dev/null; then
-                            echo "[错误] 进程未正常结束，强制终止" | tee -a "$LOGFILE"
-                            kill -SIGKILL "$FFMPEG_PID" 2>/dev/null
-                        else
-                            echo "进程已正常退出。"
-                        fi
-                        # 把源文件重命名为 skipped 文件并删除目标文件
-
-                        rm -f "$dest"
-                        echo "非完整的目标文件已删除：$dest"
-                        local skipped_file="${src%.*}-skipped.${ext}"
-                        mv -n "$src" "$skipped_file"
-                        echo "源文件$src已重命名为：$skipped_file"
-                        # local log="文件：$src\n开始时间：$start_time\n"
-                        local log="源文件$src已重命名为：$skipped_file"
-                        FILE_STATS+=("$log")
-                        # 跳出循环
-                        break
-                    fi
-                else
-                    counter=0
-                fi
-                last_check_time=$current_time
-            fi
-        fi
-    done <&3
-
-    # 清理文件描述符
-    exec 3<&-
-
-    # # 等待进程结束
-    # wait $FFMPEG_PID
-    exit_status=$? # 获取退出状态
-
-    # 后续处理
-    if [[ $exit_status -eq 0 ]]; then
-        local comp_size=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-        if ((comp_size > 0 && comp_size < orig_size)); then
-            ((PROCESSED++))
-            TOTAL_ORIGIN=$((TOTAL_ORIGIN + orig_size))
-            TOTAL_COMPRESSED=$((TOTAL_COMPRESSED + comp_size))
-            # 记录日志
-            local duration=$(($(date +%s) - start))
-            local log="文件：$src\n开始时间：$start_time\n耗时：$(printf "%02dh%02dm%02ds" $((duration / 3600)) $((duration % 3600 / 60)) $((duration % 60)))\n"
-            log+="原始：$(format_bytes $orig_size) → 压缩：$(format_bytes $comp_size)\n"
-            log+="压缩率：$(awk "BEGIN {printf \"%.2f\", ($orig_size - $comp_size)/$orig_size*100}")%\n"
-            FILE_STATS+=("$log")
-        else
-            echo "[错误] 输出文件异常" | tee -a "$LOGFILE"
-            exit_status=1
-        fi
-    fi
-
-    # 文件移动处理
-    if [[ $exit_status -eq 0 && $MOVE_FILES -eq 1 ]]; then
+    # 文件移动处理（仅在转换成功时执行）
+    if [[ $status == "converted" && $MOVE_FILES -eq 1 ]]; then
         local dest_dir="$(dirname "$src")/originals_bak"
-        mkdir -p "$dest_dir" || return 1
-        if mv -n "$src" "$dest_dir/"; then
-            echo "原文件已移动至：$dest_dir/$(basename "$src")" | tee -a "$LOGFILE"
-        else
-            echo "[错误] 文件移动失败" | tee -a "$LOGFILE"
-        fi
+        mkdir -p "$dest_dir" && mv -n "$src" "$dest_dir/" && {
+            echo "源文件已移动至：$dest_dir/$(basename "$src")" | tee -a "$LOGFILE"
+        }
     fi
 
     return $exit_status
 }
-
-# 增强型终止函数
-# kill_ffmpeg() {
-#     [[ $FFMPEG_PID -gt 0 ]] && {
-#         echo "[安全清理] 终止进程树 PID:$FFMPEG_PID"
-#         pkill -P $FFMPEG_PID
-#         kill -SIGTERM $FFMPEG_PID
-#         sleep 1
-#         kill -SIGKILL $FFMPEG_PID 2>/dev/null
-#         # 清理临时文件
-#         [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
-#     }
-# }
 
 # 主函数
 main() {
@@ -520,7 +508,7 @@ main() {
 
         # 新增：移动文件确认提示
         if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
-            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            read -p "是否将处理后的源文件移动到originals_bak文件夹？[y/N] " -n 1 -r
             echo
             [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
@@ -551,7 +539,7 @@ main() {
 
         # 新增：移动文件确认提示
         if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
-            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            read -p "是否将处理后的源文件移动到originals_bak文件夹？[y/N] " -n 1 -r
             echo
             [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
@@ -587,7 +575,7 @@ main() {
 
         # 新增：移动文件确认提示
         if [[ $MOVE_FILES -eq 0 && $SKIP_CONFIRM -eq 0 ]]; then
-            read -p "是否将处理后的原文件移动到originals_bak文件夹？[y/N] " -n 1 -r
+            read -p "是否将处理后的源文件移动到originals_bak文件夹？[y/N] " -n 1 -r
             echo
             [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
