@@ -2,7 +2,7 @@
 
 ##############################################
 # 视频压缩脚本（支持 H.264、H.265 和 VP9 编码）
-# 版本：10.1.0 | 增加自动移动源文件到 originals_bak 文件夹
+# 版本：10.2.0 | 增加自动移动源文件到 originals_bak 文件夹
 ##############################################
 
 SECONDS=0
@@ -223,8 +223,9 @@ validate_params() {
                 preset="$arg"
             elif [[ " ${SUPPORTED[ENCODERS]} " =~ " $arg " ]]; then
                 encoders+=("$arg")
-            elif [[ "$arg" == "all" || " ${SUPPORTED[FORMATS]} " =~ " $arg " ]]; then
-                [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("$arg")
+            # 修改点1：参数格式统一小写
+            elif [[ "$arg" == "all" ]] || [[ " ${SUPPORTED[FORMATS]} " =~ " ${arg,,} " ]]; then
+                [[ "$arg" == "all" ]] && formats=(${SUPPORTED[FORMATS]}) || formats+=("${arg,,}")
             elif [[ -f "$directory/$arg" || -f "$arg" ]]; then
                 files+=("$arg")
             else
@@ -288,6 +289,12 @@ validate_params() {
 process_file() {
     local src="$1" enc="$2"
     local base="${src%.*}" ext="${src##*.}"
+    # 修改点3：统一小写判断
+    local ext_lower="${ext,,}"
+    if [[ ! " ${FORMATS[@]} " =~ " $ext_lower " ]]; then
+        echo "跳过不支持格式的文件：$src" | tee -a "$LOGFILE"
+        return
+    fi
     local dest="${base}-${enc}.${ext}"
     local exit_status=127
     local FFMPEG_PID=0 FFMPEG_PGID=0
@@ -469,7 +476,7 @@ main() {
             for ((i = 0; i < ${#PATTERNS[@]}; i++)); do
                 pattern=${PATTERNS[$i]}
                 [[ $i -gt 0 ]] && find_cmd+=" -o "
-                find_cmd+=" -name \"$pattern\""
+                find_cmd+=" -iname \"$pattern\""
             done
             find_cmd+=" \)"
         fi
@@ -556,12 +563,16 @@ main() {
         # 显示格式匹配的文件
         fileNum=0
         echo "找到的文件列表：" | tee -a "$LOGFILE"
+        shopt -s nocaseglob # 启用不区分大小写的通配符
         for fmt in "${FORMATS[@]}"; do
             for file in *."$fmt"; do
-                [[ -f "$file" ]] && echo "$file" | tee -a "$LOGFILE"
-                [[ -f "$file" ]] && ((fileNum++))
+                if [[ -f "$file" ]]; then
+                    echo "$file" | tee -a "$LOGFILE"
+                    ((fileNum++))
+                fi
             done
         done
+        shopt -u nocaseglob
 
         # 用户确认
         if [[ $SKIP_CONFIRM -eq 0 ]]; then
@@ -580,7 +591,11 @@ main() {
             [[ $REPLY =~ ^[Yy]$ ]] && MOVE_FILES=1
         fi
 
+        # 新增：设置总文件数
+        TOTAL_FILES=$fileNum
+
         # 处理文件
+        shopt -s nocaseglob
         for fmt in "${FORMATS[@]}"; do
             for file in *."$fmt"; do
                 [[ -f "$file" ]] || continue
@@ -589,6 +604,7 @@ main() {
                 done
             done
         done
+        shopt -u nocaseglob
     fi
     # 统计总耗时
     duration=$SECONDS
